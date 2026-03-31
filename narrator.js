@@ -14,11 +14,11 @@ const { execSync, spawn } = require('child_process');
 
 const HOME = process.env.HOME || process.env.USERPROFILE || '/tmp';
 const CONFIG_PATH = path.join(HOME, '.claude', 'narrator.json');
-const STATE_PATH = '/tmp/claude-narrator-state.json';
 const MUTE_FILE = path.join(HOME, '.claude', 'narrator-muted');
 const TMP_DIR = '/tmp';
 const TMP_PREFIX = 'claude-narrator-';
 const CACHE_DIR = path.join(HOME, '.claude', 'narrator-cache');
+const SESSION_REGISTRY = '/tmp/claude-narrator-sessions.json';
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
 
@@ -34,6 +34,13 @@ const DEFAULTS = {
   maxContextItems: 15,
   repetitionThreshold: 3,
   destructiveAlertSound: '/System/Library/Sounds/Basso.aiff',
+  // Extra voices for concurrent sessions. Session 0 uses main voice/rate above.
+  // Each entry: { voice, rate } for say, or { voice, rate, elevenLabsVoiceId } for ElevenLabs
+  sessionVoices: [
+    { voice: 'Daniel (Enhanced)', rate: 200 },
+    { voice: 'Karen (Enhanced)', rate: 205 },
+    { voice: 'Tessa (Enhanced)', rate: 200 },
+  ],
 };
 
 // ─── Generic description filters ────────────────────────────────────────────
@@ -63,56 +70,145 @@ const DESTRUCTIVE = [
   /\bdocker\s+system\s+prune\b/i,
 ];
 
+// ─── Session detection ──────────────────────────────────────────────────────
+// Each Claude Code session gets a distinct voice + phrasing style so you can
+// tell concurrent sessions apart by ear.
+
+const STALE_SESSION_MS = 30 * 60 * 1000; // 30 min without activity → expired
+
+function getSessionNumber() {
+  const myId = String(process.ppid);
+  let registry;
+  try {
+    registry = JSON.parse(fs.readFileSync(SESSION_REGISTRY, 'utf8'));
+  } catch {
+    registry = { sessions: {} };
+  }
+
+  const now = Date.now();
+
+  // Expire stale sessions
+  for (const [pid, info] of Object.entries(registry.sessions)) {
+    if (now - info.lastSeen > STALE_SESSION_MS) delete registry.sessions[pid];
+  }
+
+  // Register or refresh this session
+  if (!registry.sessions[myId]) {
+    const used = new Set(Object.values(registry.sessions).map((s) => s.number));
+    let num = 0;
+    while (used.has(num)) num++;
+    registry.sessions[myId] = { number: num, lastSeen: now };
+  } else {
+    registry.sessions[myId].lastSeen = now;
+  }
+
+  const sessionNum = registry.sessions[myId].number;
+  try { fs.writeFileSync(SESSION_REGISTRY, JSON.stringify(registry), 'utf8'); } catch { /* ignore */ }
+  return sessionNum;
+}
+
+function statePath(sessionNum) {
+  return `/tmp/claude-narrator-state-${sessionNum}.json`;
+}
+
+// ─── Conversational prefixes ────────────────────────────────────────────────
+// Each session rotates through its own set so concurrent sessions sound distinct.
+
+const SESSION_PREFIXES = [
+  // Session 0 — casual permission
+  [
+    (a) => `Can I ${a}?`,
+    (a) => `Mind if I ${a}?`,
+    (a) => `Let me ${a}`,
+    (a) => `Going to ${a}`,
+    (a) => `I'd like to ${a}`,
+  ],
+  // Session 1 — polite / questioning
+  [
+    (a) => `Should I ${a}?`,
+    (a) => `Would you like me to ${a}?`,
+    (a) => `Shall I ${a}?`,
+    (a) => `How about I ${a}?`,
+    (a) => `OK if I ${a}?`,
+  ],
+  // Session 2 — brief / direct
+  [
+    (a) => `Quick ${a}`,
+    (a) => `Need to ${a}`,
+    (a) => `Just going to ${a}`,
+    (a) => `Time to ${a}`,
+    (a) => `About to ${a}`,
+  ],
+  // Session 3 — confident / narrating
+  [
+    (a) => `Now I'll ${a}`,
+    (a) => `Next up, ${a}`,
+    (a) => `Alright, ${a}`,
+    (a) => `On it — ${a}`,
+    (a) => `Here we go, ${a}`,
+  ],
+];
+let prefixIndex = 0;
+let activeSession = 0;
+
+function askStyle(action) {
+  const prefixes = SESSION_PREFIXES[activeSession % SESSION_PREFIXES.length];
+  const fn = prefixes[prefixIndex % prefixes.length];
+  prefixIndex++;
+  return fn(action);
+}
+
 // ─── Bash command templates ─────────────────────────────────────────────────
+// Values are now verb phrases (no prefix) — prefix is applied by askStyle()
 
 const BASH_TEMPLATES = [
-  [/^git\s+status/,          'Want to check git status'],
-  [/^git\s+diff/,            'Want to review the changes'],
-  [/^git\s+log/,             'Want to check git history'],
-  [/^git\s+add/,             'Want to stage the changes'],
-  [/^git\s+commit/,          'Want to commit the changes'],
-  [/^git\s+push\s+.*--force/,'Want to force push to remote'],
-  [/^git\s+push\s+.*-f\b/,  'Want to force push to remote'],
-  [/^git\s+push/,            'Want to push to remote'],
-  [/^git\s+pull/,            'Want to pull from remote'],
-  [/^git\s+checkout/,        'Want to switch branches'],
-  [/^git\s+branch/,          'Want to manage branches'],
-  [/^git\s+merge/,           'Want to merge branches'],
-  [/^git\s+rebase/,          'Want to rebase'],
-  [/^git\s+stash/,           'Want to stash changes'],
-  [/^git\s+reset\s+--hard/,  'Want to reset git history'],
-  [/^git\s+clone/,           'Want to clone a repository'],
-  [/^(npm|yarn|pnpm)\s+run\s+(test|spec)/i, 'Want to run the tests'],
-  [/^(npm|yarn|pnpm)\s+test/i, 'Want to run the tests'],
-  [/^pytest\b/,              'Want to run the tests'],
-  [/^jest\b/,                'Want to run the tests'],
-  [/^cargo\s+test/,          'Want to run the tests'],
-  [/^go\s+test/,             'Want to run the tests'],
-  [/^(npm|yarn|pnpm)\s+run\s+build/i, 'Want to build the project'],
-  [/^(npm|yarn|pnpm)\s+run\s+dev/i,   'Want to start the dev server'],
-  [/^(npm|yarn|pnpm)\s+run\s+lint/i,  'Want to run the linter'],
-  [/^(npm|pip|yarn|pnpm)\s+install/i,  'Want to install dependencies'],
-  [/^pip\s+install/i,        'Want to install dependencies'],
-  [/^cargo\s+build/,         'Want to build the project'],
-  [/^go\s+build/,            'Want to build the project'],
-  [/^rm\s+-rf\b/,            'Want to delete some files'],
-  [/^rm\s/,                  'Want to delete a file'],
-  [/^ls\b/,                  'Want to list the directory'],
-  [/^find\s/,                'Want to search for files'],
-  [/^mkdir\b/,               'Want to create a directory'],
-  [/^docker\s/,              'Want to run docker'],
-  [/^docker-compose\s/,      'Want to run docker compose'],
-  [/^curl\s/,                'Want to make a network request'],
-  [/^wget\s/,                'Want to make a network request'],
-  [/^gh\s/,                  'Want to use GitHub CLI'],
-  [/^cat\s/,                 'Want to read a file'],
-  [/^cd\s/,                  'Want to change directory'],
-  [/^cp\s/,                  'Want to copy some files'],
-  [/^mv\s/,                  'Want to move some files'],
-  [/^chmod\s/,               'Want to change permissions'],
-  [/^echo\s/,                'Want to run echo'],
-  [/^python3?\s/,            'Want to run Python'],
-  [/^node\s/,                'Want to run Node'],
+  [/^git\s+status/,          'check git status'],
+  [/^git\s+diff/,            'review the changes'],
+  [/^git\s+log/,             'check git history'],
+  [/^git\s+add/,             'stage the changes'],
+  [/^git\s+commit/,          'commit the changes'],
+  [/^git\s+push\s+.*--force/,'force push to remote'],
+  [/^git\s+push\s+.*-f\b/,  'force push to remote'],
+  [/^git\s+push/,            'push to remote'],
+  [/^git\s+pull/,            'pull from remote'],
+  [/^git\s+checkout/,        'switch branches'],
+  [/^git\s+branch/,          'manage branches'],
+  [/^git\s+merge/,           'merge branches'],
+  [/^git\s+rebase/,          'rebase'],
+  [/^git\s+stash/,           'stash changes'],
+  [/^git\s+reset\s+--hard/,  'reset git history'],
+  [/^git\s+clone/,           'clone a repository'],
+  [/^(npm|yarn|pnpm)\s+run\s+(test|spec)/i, 'run the tests'],
+  [/^(npm|yarn|pnpm)\s+test/i, 'run the tests'],
+  [/^pytest\b/,              'run the tests'],
+  [/^jest\b/,                'run the tests'],
+  [/^cargo\s+test/,          'run the tests'],
+  [/^go\s+test/,             'run the tests'],
+  [/^(npm|yarn|pnpm)\s+run\s+build/i, 'build the project'],
+  [/^(npm|yarn|pnpm)\s+run\s+dev/i,   'start the dev server'],
+  [/^(npm|yarn|pnpm)\s+run\s+lint/i,  'run the linter'],
+  [/^(npm|pip|yarn|pnpm)\s+install/i,  'install dependencies'],
+  [/^pip\s+install/i,        'install dependencies'],
+  [/^cargo\s+build/,         'build the project'],
+  [/^go\s+build/,            'build the project'],
+  [/^rm\s+-rf\b/,            'delete some files'],
+  [/^rm\s/,                  'delete a file'],
+  [/^ls\b/,                  'list the directory'],
+  [/^find\s/,                'search for files'],
+  [/^mkdir\b/,               'create a directory'],
+  [/^docker\s/,              'run docker'],
+  [/^docker-compose\s/,      'run docker compose'],
+  [/^curl\s/,                'make a network request'],
+  [/^wget\s/,                'make a network request'],
+  [/^gh\s/,                  'use GitHub CLI'],
+  [/^cat\s/,                 'read a file'],
+  [/^cd\s/,                  'change directory'],
+  [/^cp\s/,                  'copy some files'],
+  [/^mv\s/,                  'move some files'],
+  [/^chmod\s/,               'change permissions'],
+  [/^echo\s/,                'run echo'],
+  [/^python3?\s/,            'run Python'],
+  [/^node\s/,                'run Node'],
 ];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -127,19 +223,19 @@ function loadConfig() {
   return { ...DEFAULTS };
 }
 
-function loadState() {
+function loadState(stPath) {
   try {
-    if (fs.existsSync(STATE_PATH)) {
-      const raw = fs.readFileSync(STATE_PATH, 'utf8');
+    if (fs.existsSync(stPath)) {
+      const raw = fs.readFileSync(stPath, 'utf8');
       return JSON.parse(raw);
     }
   } catch { /* fall through */ }
   return { lastTool: null, consecutiveCount: 0, lastTimestamp: 0, recentActions: [] };
 }
 
-function saveState(state) {
+function saveState(stPath, state) {
   try {
-    fs.writeFileSync(STATE_PATH, JSON.stringify(state), 'utf8');
+    fs.writeFileSync(stPath, JSON.stringify(state), 'utf8');
   } catch { /* ignore */ }
 }
 
@@ -156,31 +252,49 @@ function friendlyPath(filePath) {
   const fileName = parts[parts.length - 1] || '';
   const parentDir = parts.length > 1 ? parts[parts.length - 2] : '';
 
-  // For index/page files, use parent directory
+  // ── Index/page/layout files → "the [parent] page" ──
   if (/^(index|page|layout|route)\.(ts|tsx|js|jsx|py)$/.test(fileName)) {
+    const kind = fileName.split('.')[0];
     const name = parentDir
       .replace(/^\[.*\]$/, 'detail')
       .replace(/^\(.*\)$/, (m) => m.slice(1, -1))
       .replace(/[-_]/g, ' ');
-    return `the ${name} page`;
+    return `the ${name} ${kind}`;
   }
 
-  // For common config files
-  if (/^(package|tsconfig|tailwind\.config|next\.config|\.env)/.test(fileName)) {
-    return fileName.replace(/\.(json|js|ts|mjs|cjs)$/, '').replace(/[-_.]/g, ' ');
+  // ── Well-known config/root files → spoken as-is ──
+  if (/^(package\.json|tsconfig.*\.json|next\.config\.\w+|tailwind\.config\.\w+|\.env.*|Dockerfile|docker-compose.*|Makefile|Cargo\.toml|go\.(mod|sum)|pyproject\.toml|requirements\.txt|pom\.xml|build\.gradle.*)$/i.test(fileName)) {
+    return fileName.replace(/\./g, ' ');
   }
 
-  // General case: strip extension, convert separators to spaces
-  const base = fileName
-    .replace(/\.(ts|tsx|js|jsx|py|rs|go|java|rb|md|json|yaml|yml|toml|css|scss|html|sql)$/, '')
-    .replace(/[-_]/g, ' ');
+  // ── General files ──
+  // Separate base name from extension
+  const extMatch = fileName.match(/\.(ts|tsx|js|jsx|py|rs|go|java|rb|md|json|yaml|yml|toml|css|scss|html|sql|sh|swift|kt|c|cpp|h|hpp|vue|svelte)$/);
+  const ext = extMatch ? extMatch[1] : '';
+  const base = ext ? fileName.slice(0, -(ext.length + 1)) : fileName;
+  const humanBase = base.replace(/[-_]/g, ' ');
 
-  // Add context from parent dir if the name is too generic
-  if (/^(service|utils?|helpers?|types?|models?|config|constants?)$/.test(base) && parentDir) {
-    return `the ${parentDir.replace(/[-_]/g, ' ')} ${base}`;
+  // Build spoken name: "auth service dot py"
+  const spokenName = ext ? `${humanBase} dot ${ext}` : humanBase;
+
+  // ── Parent folder context ──
+  // Skip generic container dirs that don't add useful context
+  const SKIP_PARENTS = /^(src|app|lib|dist|build|out|public|static|internal|cmd|pkg|node_modules|__pycache__|\.next)$/i;
+
+  if (parentDir && !SKIP_PARENTS.test(parentDir)) {
+    const humanParent = parentDir
+      .replace(/^\[.*\]$/, 'detail')
+      .replace(/^\(.*\)$/, (m) => m.slice(1, -1))
+      .replace(/[-_]/g, ' ');
+
+    // Don't repeat context if parent name is already in the file name
+    if (!humanBase.toLowerCase().includes(humanParent.toLowerCase()) &&
+        !humanParent.toLowerCase().includes(humanBase.toLowerCase())) {
+      return `${spokenName} in ${humanParent}`;
+    }
   }
 
-  return base;
+  return spokenName;
 }
 
 function shortPattern(pattern) {
@@ -228,53 +342,54 @@ function inferArea(recentActions) {
 function generateNarration(toolName, toolInput) {
   const desc = toolInput.description || '';
 
-  // Priority 1: Use description field if non-generic — prefix with conversational tone
+  // Priority 1: Use description field if non-generic
   if (desc && desc.length > 5 && !GENERIC_DESC.some((rx) => rx.test(desc))) {
     const words = desc.split(/\s+/);
     const trimmed = words.length <= 10 ? desc : words.slice(0, 8).join(' ');
-    return `Want to ${trimmed.charAt(0).toLowerCase()}${trimmed.slice(1)}`;
+    return askStyle(trimmed.charAt(0).toLowerCase() + trimmed.slice(1));
   }
 
   // Priority 2: Template matching
   switch (toolName) {
     case 'Read': {
       const name = friendlyPath(toolInput.file_path);
-      return name ? `Want to read ${name}` : 'Want to read a file';
+      return askStyle(name ? `read ${name}` : 'read a file');
     }
     case 'Edit': {
       const name = friendlyPath(toolInput.file_path);
-      return name ? `Want to edit ${name}` : 'Want to edit a file';
+      return askStyle(name ? `edit ${name}` : 'edit a file');
     }
     case 'Write': {
       const name = friendlyPath(toolInput.file_path);
       const verb = toolInput.file_path && fs.existsSync(toolInput.file_path) ? 'update' : 'create';
-      return name ? `Want to ${verb} ${name}` : `Want to ${verb} a file`;
+      return askStyle(name ? `${verb} ${name}` : `${verb} a file`);
     }
     case 'Grep': {
       const pat = shortPattern(toolInput.pattern);
-      return `Want to search for ${pat}`;
+      return askStyle(`search for ${pat}`);
     }
     case 'Glob': {
       const pat = toolInput.pattern || '';
-      return pat ? `Want to find ${pat} files` : 'Want to find some files';
+      return askStyle(pat ? `find ${pat} files` : 'find some files');
     }
     case 'Bash': {
       const cmd = (toolInput.command || '').trim();
-      for (const [rx, text] of BASH_TEMPLATES) {
-        if (rx.test(cmd)) return text;
+      for (const [rx, action] of BASH_TEMPLATES) {
+        if (rx.test(cmd)) return askStyle(action);
       }
-      return 'Want to run a command';
+      return askStyle('run a command');
     }
     case 'Agent': {
       const agentDesc = toolInput.description || '';
       if (agentDesc && agentDesc.length > 3) {
         const words = agentDesc.split(/\s+/);
-        return words.length <= 6 ? `Want to launch an agent for ${agentDesc}` : `Want to launch an agent for ${words.slice(0, 5).join(' ')}`;
+        const short = words.length <= 6 ? agentDesc : words.slice(0, 5).join(' ');
+        return askStyle(`launch an agent for ${short}`);
       }
-      return 'Want to launch a sub-agent';
+      return askStyle('launch a sub-agent');
     }
     default:
-      return `Want to use ${toolName}`;
+      return askStyle(`use ${toolName}`);
   }
 }
 
@@ -485,14 +600,32 @@ async function main() {
   const config = loadConfig();
   if (!config.enabled) return;
 
+  // ── Session detection ──
+  const sessionNum = getSessionNumber();
+  activeSession = sessionNum;
+
+  // Override voice for non-primary sessions
+  if (sessionNum > 0) {
+    const extras = config.sessionVoices || DEFAULTS.sessionVoices;
+    const sv = extras[(sessionNum - 1) % extras.length];
+    if (sv) {
+      config.voice = sv.voice || config.voice;
+      config.rate = sv.rate || config.rate;
+      if (sv.elevenLabsVoiceId && config.elevenlabs) {
+        config.elevenlabs = { ...config.elevenlabs, voiceId: sv.elevenLabsVoiceId };
+      }
+    }
+  }
+
   // Check if tool should be narrated
   const narrate = config.narrateTools || DEFAULTS.narrateTools;
   const skip = config.skipTools || [];
   if (skip.includes(toolName)) return;
   if (!narrate.includes(toolName)) return;
 
-  // Load state
-  const state = loadState();
+  // Load per-session state
+  const stPath = statePath(sessionNum);
+  const state = loadState(stPath);
   const now = Date.now();
   const timeSinceLastMs = now - (state.lastTimestamp || 0);
 
@@ -529,10 +662,10 @@ async function main() {
                       toolName === 'Grep' ? 'search through' :
                       toolName === 'Glob' ? 'find' :
                       `use ${toolName} on`;
-    text = `Want to ${toolLabel} a few more files`;
+    text = askStyle(`${toolLabel} a few more files`);
   } else if (state.consecutiveCount > threshold) {
     // Silent — too many repetitions
-    saveState(state);
+    saveState(stPath, state);
     return;
   } else {
     text = generateNarration(toolName, toolInput);
@@ -565,7 +698,7 @@ async function main() {
   speak(text, config, destructive);
 
   // Save state
-  saveState(state);
+  saveState(stPath, state);
 
   // Occasionally clean up old temp files
   if (Math.random() < 0.05) cleanupOldTempFiles();

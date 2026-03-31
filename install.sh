@@ -103,7 +103,7 @@ fi
 
 info "Registering PreToolUse hook..."
 
-HOOK_ENTRY="{\"type\":\"command\",\"command\":\"node $SCRIPTS_DIR/narrator.js\"}"
+HOOK_ENTRY="{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"node $SCRIPTS_DIR/narrator.js\"}]}"
 
 if [ -f "$SETTINGS_FILE" ]; then
   # Read existing settings
@@ -116,7 +116,10 @@ if [ -f "$SETTINGS_FILE" ]; then
     try {
       const settings = JSON.parse(input);
       const hooks = settings.hooks?.PreToolUse || [];
-      const exists = hooks.some(h => h.command && h.command.includes('narrator.js'));
+      const exists = hooks.some(h =>
+        (h.command && h.command.includes('narrator.js')) ||
+        (h.hooks && h.hooks.some(sub => sub.command && sub.command.includes('narrator.js')))
+      );
       process.exit(exists ? 0 : 1);
     } catch { process.exit(1); }
   " 2>/dev/null; then
@@ -135,8 +138,11 @@ if [ -f "$SETTINGS_FILE" ]; then
       if (!settings.hooks) settings.hooks = {};
       if (!Array.isArray(settings.hooks.PreToolUse)) settings.hooks.PreToolUse = [];
       settings.hooks.PreToolUse.push({
-        type: 'command',
-        command: 'node $SCRIPTS_DIR/narrator.js'
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'node $SCRIPTS_DIR/narrator.js'
+        }]
       });
       fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2) + '\n');
     " <<< "$EXISTING"
@@ -149,8 +155,11 @@ else
     const settings = {
       hooks: {
         PreToolUse: [{
-          type: 'command',
-          command: 'node $SCRIPTS_DIR/narrator.js'
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: 'node $SCRIPTS_DIR/narrator.js'
+          }]
         }]
       }
     };
