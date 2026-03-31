@@ -42,13 +42,13 @@ The default macOS voices are decent, but the **Premium** voices are a significan
 
 **To download premium voices:**
 
-1. Open **System Settings** > **Accessibility** > **Spoken Content**
-2. Click **System Voice** dropdown > **Manage Voices...**
+1. Open **System Settings** > **Accessibility** > **Read & Speak**
+2. Click **System voice** dropdown > **Manage Voices...**
 3. Download any voice marked **(Premium)** — e.g., **Samantha (Premium)**, **Tom (Premium)**, **Zoe (Premium)**
 4. Update `~/.claude/narrator.json`: `"voice": "Samantha (Premium)"`
 
 **Best premium voices for narration:**
-- **Samantha (Premium)** — warm, natural American English (default)
+- **Samantha (Premium)** — warm, natural American English
 - **Tom (Premium)** — clear, natural American male
 - **Zoe (Premium)** — lively, great for casual tone
 - **Daniel (Premium)** — British English, professional
@@ -130,7 +130,7 @@ Edit `~/.claude/narrator.json`:
 |---|---|---|
 | `enabled` | `true` | Master on/off switch |
 | `tts` | `"say"` | TTS engine: `"say"` (macOS) or `"elevenlabs"` |
-| `voice` | `"Samantha"` | macOS TTS voice name |
+| `voice` | `"Samantha"` | macOS TTS voice name (default) |
 | `rate` | `210` | Words per minute for macOS `say` (150-300) |
 | `volume` | `0.5` | Playback volume (0.0-1.0) |
 | `elevenlabs` | `null` | ElevenLabs config: `{ apiKey, voiceId?, model? }` |

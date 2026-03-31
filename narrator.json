@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "voice": "Daniel",
+  "voice": "Samantha",
   "rate": 210,
   "volume": 0.5,
   "tts": "say",

@@ -24,7 +24,7 @@ const CACHE_DIR = path.join(HOME, '.claude', 'narrator-cache');
 
 const DEFAULTS = {
   enabled: true,
-  voice: 'Daniel',
+  voice: 'Samantha',
   rate: 210,
   volume: 0.5,
   tts: 'say',                // 'say' (macOS built-in) or 'elevenlabs'
