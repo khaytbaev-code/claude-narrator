@@ -7,7 +7,7 @@ An audio co-pilot for [Claude Code](https://docs.anthropic.com/en/docs/claude-co
 ## Quick Install
 
 ```bash
-git clone https://github.com/YOUR_USER/claude-narrator.git
+git clone https://github.com/khaytbaev-code/claude-narrator.git
 cd claude-narrator
 ./install.sh
 ```
