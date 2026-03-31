@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+*.aiff
+*.wav
+*.mp3
+/tmp/
+narrator-cache/

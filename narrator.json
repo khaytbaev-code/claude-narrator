@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "voice": "Daniel",
+  "rate": 210,
+  "volume": 0.5,
+  "tts": "say",
+  "narrateTools": ["Bash", "Edit", "Write", "Read", "Grep", "Glob", "Agent"],
+  "skipTools": [],
+  "maxContextItems": 15,
+  "repetitionThreshold": 3,
+  "destructiveAlertSound": "/System/Library/Sounds/Basso.aiff"
+}
