@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ─── Claude Code Narrator — Installer ───────────────────────────────────────
 # Usage:
-#   git clone https://github.com/YOUR_USER/claude-narrator && cd claude-narrator && ./install.sh
+#   git clone https://github.com/khaytbaev-code/claude-narrator && cd claude-narrator && ./install.sh
 #   OR
 #   curl -fsSL https://raw.githubusercontent.com/YOUR_USER/claude-narrator/main/install.sh | bash
 
@@ -206,5 +206,5 @@ echo ""
 # Test sound
 if command -v say &>/dev/null; then
   info "Playing test narration..."
-  say -v "${NARRATOR_VOICE:-Daniel}" "Claude Code Narrator installed" &
+  say -v "${NARRATOR_VOICE:-Samantha}" "Claude Code Narrator installed" &
 fi
