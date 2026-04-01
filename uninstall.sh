@@ -119,7 +119,7 @@ if python3 -c "import mlx_audio" 2>/dev/null; then
   read -p "  Uninstall mlx-audio Python package? [y/N] " -n 1 -r
   echo ""
   if [[ $REPLY =~ ^[Yy]$ ]]; then
-    pip uninstall mlx-audio -y 2>/dev/null && ok "Uninstalled mlx-audio" || warn "Could not uninstall mlx-audio"
+    pip3 uninstall mlx-audio -y 2>/dev/null && ok "Uninstalled mlx-audio" || warn "Could not uninstall mlx-audio"
   else
     warn "Kept mlx-audio installed"
   fi

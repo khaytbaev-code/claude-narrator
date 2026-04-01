@@ -66,8 +66,12 @@ if [ "$ARCH" = "arm64" ]; then
       else
         if command -v uv &>/dev/null; then
           uv pip install mlx-audio 2>/dev/null && MLX_TTS="mlx" && ok "Installed mlx-audio via uv" || warn "Failed to install mlx-audio — using macOS say"
-        else
+        elif command -v pip3 &>/dev/null; then
+          pip3 install mlx-audio 2>/dev/null && MLX_TTS="mlx" && ok "Installed mlx-audio via pip3" || warn "Failed to install mlx-audio — using macOS say"
+        elif command -v pip &>/dev/null; then
           pip install mlx-audio 2>/dev/null && MLX_TTS="mlx" && ok "Installed mlx-audio via pip" || warn "Failed to install mlx-audio — using macOS say"
+        else
+          warn "Neither uv, pip3, nor pip found — cannot install mlx-audio. Using macOS say"
         fi
       fi
     else
