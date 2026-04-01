@@ -29,6 +29,12 @@ PostToolUse hook → narrator.js --post
        +-- Bash failures → Gemini-enriched "Null ref on line 42" or fallback "Tests failed"
        +-- Test success → "Nice, tests are green"
        +-- Stores lastBashExitCode for pattern detection
+
+Stop hook → narrator.js --stop
+       |
+       +-- Substantial turns (3+ tools) → Gemini summary or ambient phrase
+       +-- Quick turns (1-2 tools) → Ambient phrase: "Your turn" / "All yours"
+       +-- Text-only turns (0 tools) → Silent
 ```
 
 **Single file, zero JS dependencies.** Pure Node.js 18+ stdlib. mlx-audio installed via pip.
@@ -76,6 +82,7 @@ commands/
 - **Gemini milestone narration**: Context-aware commentary at task transitions, failures, completions. Fire-and-forget on PreToolUse, await on PostToolUse
 - **Multi-session voices**: Each session gets distinct Kokoro voice + phrasing style via PPID detection
 - **PostToolUse narration**: Failures get Gemini-enriched commentary. Test success gets "Nice, tests are green". Regular success = silent
+- **Stop narration**: Turn-completion narration. Substantial turns (3+ tools) get Gemini summary, quick turns (1-2 tools) get ambient phrase, text-only turns are silent
 
 ## Multi-Session Voices
 
@@ -101,6 +108,7 @@ commands/
 - `narrateTools` (string[]) — tools to narrate
 - `skipTools` (string[]) — tools to skip
 - `narrateFailures` (bool, default true) — speak Bash failures/successes via PostToolUse
+- `narrateStop` (bool, default true) — speak turn-completion narration via Stop hook
 - `repetitionThreshold` (int, default 3) — same-tool count before batching
 
 ## Development Notes

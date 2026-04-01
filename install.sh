@@ -174,7 +174,7 @@ if [ -f "$SETTINGS_FILE" ]; then
   # Read existing settings
   EXISTING=$(cat "$SETTINGS_FILE")
 
-  # Check if both hooks already registered
+  # Check if all hooks already registered
   if echo "$EXISTING" | node -e "
     const fs = require('fs');
     const input = fs.readFileSync('/dev/stdin', 'utf8');
@@ -186,7 +186,8 @@ if [ -f "$SETTINGS_FILE" ]; then
       );
       const pre = hasNarrator(settings.hooks?.PreToolUse);
       const post = hasNarrator(settings.hooks?.PostToolUse);
-      process.exit(pre && post ? 0 : 1);
+      const stop = hasNarrator(settings.hooks?.Stop);
+      process.exit(pre && post && stop ? 0 : 1);
     } catch { process.exit(1); }
   " 2>/dev/null; then
     warn "Hooks already registered in settings.json — skipping"
@@ -218,9 +219,17 @@ if [ -f "$SETTINGS_FILE" ]; then
           command: 'node $SCRIPTS_DIR/narrator.js --post'
         }]
       });
+      if (!Array.isArray(settings.hooks.Stop)) settings.hooks.Stop = [];
+      settings.hooks.Stop.push({
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'node $SCRIPTS_DIR/narrator.js --stop'
+        }]
+      });
       fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2) + '\n');
     " <<< "$EXISTING"
-    ok "Registered PreToolUse and PostToolUse hooks in settings.json"
+    ok "Registered PreToolUse, PostToolUse, and Stop hooks in settings.json"
   fi
 else
   # Create new settings file with hook
@@ -240,6 +249,13 @@ else
           hooks: [{
             type: 'command',
             command: 'node $SCRIPTS_DIR/narrator.js --post'
+          }]
+        }],
+        Stop: [{
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: 'node $SCRIPTS_DIR/narrator.js --stop'
           }]
         }]
       }

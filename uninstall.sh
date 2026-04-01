@@ -59,7 +59,7 @@ if [ -f "$SETTINGS_FILE" ]; then
     } catch {
       process.exit(0);
     }
-    for (const hookType of ['PreToolUse', 'PostToolUse']) {
+    for (const hookType of ['PreToolUse', 'PostToolUse', 'Stop']) {
       if (settings.hooks && Array.isArray(settings.hooks[hookType])) {
         settings.hooks[hookType] = settings.hooks[hookType].filter(
           h => !(h.command && h.command.includes('narrator.js'))

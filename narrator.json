@@ -19,6 +19,7 @@
   "narrateTools": ["Bash", "Edit", "Write", "Read", "Grep", "Glob", "Agent"],
   "skipTools": [],
   "narrateFailures": true,
+  "narrateStop": true,
   "maxContextItems": 15,
   "repetitionThreshold": 3,
   "destructiveAlertSound": "/System/Library/Sounds/Basso.aiff",

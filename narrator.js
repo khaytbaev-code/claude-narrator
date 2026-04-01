@@ -46,6 +46,7 @@ const DEFAULTS = {
   narrateTools: ['Bash', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'Agent'],
   skipTools: [],
   narrateFailures: true,
+  narrateStop: true,
   maxContextItems: 15,
   repetitionThreshold: 3,
   destructiveAlertSound: '/System/Library/Sounds/Basso.aiff',
@@ -292,6 +293,16 @@ const PATTERN_PHRASES = {
   refactoring:  ['Another one to update.', 'Continuing the refactor.', 'One more change.'],
   'wrapping-up': ['Finishing up.', 'Wrapping things up.', 'Almost done.'],
 };
+
+// ─── Stop (turn-complete) phrases ────────────────────────────────────────────
+
+const STOP_PHRASES = [
+  'Your turn',
+  'Ready when you are',
+  'All yours',
+  'Standing by',
+  'Over to you',
+];
 
 // ─── Warm connectors ────────────────────────────────────────────────────────
 
@@ -993,9 +1004,72 @@ async function mainPost() {
   speak(text, speakConfig, isFailure, sessionNum);
 }
 
+// ─── Stop — turn-completion narration ────────────────────────────────────────
+
+async function mainStop() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const rawInput = Buffer.concat(chunks).toString('utf8');
+  process.stdout.write(rawInput);
+
+  let input;
+  try { input = JSON.parse(rawInput); } catch { return; }
+
+  if (fs.existsSync(MUTE_FILE)) return;
+  const config = loadConfig();
+  if (!config.enabled) return;
+  if (!(config.narrateStop ?? DEFAULTS.narrateStop)) return;
+
+  const sessionNum = getSessionNumber();
+  applySessionVoice(config, sessionNum);
+
+  const stPath = statePath(sessionNum);
+  const state = loadState(stPath);
+
+  // Count actions since last Stop
+  const lastStop = state.lastStopTimestamp || 0;
+  const recentActions = state.recentActions || [];
+  const actionsSinceStop = recentActions.filter((a) => a.ts > lastStop);
+
+  // Update timestamp regardless of narration
+  state.lastStopTimestamp = Date.now();
+  saveState(stPath, state);
+
+  // Text-only turn (0 tool calls) → silent
+  if (actionsSinceStop.length === 0) return;
+
+  let text;
+
+  if (actionsSinceStop.length >= 3) {
+    // Substantial turn — try Gemini summary
+    const jarvis = config.jarvis || DEFAULTS.jarvis;
+    if (jarvis.enabled && (jarvis.apiKey || process.env.GEMINI_API_KEY)) {
+      const toolCounts = {};
+      for (const a of actionsSinceStop) {
+        toolCounts[a.tool] = (toolCounts[a.tool] || 0) + 1;
+      }
+      const toolSummary = Object.entries(toolCounts).map(([t, c]) => `${t} x${c}`).join(', ');
+      const lastMsg = (input.last_assistant_message || '').slice(0, 300);
+      const prompt = `Event: turn_complete\nTools used: ${actionsSinceStop.length} (${toolSummary})\nLast message: ${lastMsg}\nGenerate a warm 1-sentence summary of what was accomplished.`;
+      text = await callGemini(prompt, config);
+    }
+    // Fallback to ambient phrase if no Gemini
+    if (!text) {
+      text = STOP_PHRASES[Date.now() % STOP_PHRASES.length];
+    }
+  } else {
+    // Quick turn (1-2 tools) — ambient phrase
+    text = STOP_PHRASES[Date.now() % STOP_PHRASES.length];
+  }
+
+  speak(text, config, false, sessionNum);
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-if (process.argv.includes('--post')) {
+if (process.argv.includes('--stop')) {
+  mainStop().catch(() => {});
+} else if (process.argv.includes('--post')) {
   mainPost().catch(() => {});
 } else {
   main().catch(() => {});
