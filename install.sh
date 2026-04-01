@@ -49,7 +49,7 @@ if [ ! -d "$CLAUDE_DIR" ]; then
 fi
 ok "Claude Code directory found"
 
-# ─── Install mlx-audio (Apple Silicon) ──────────────────────────────────────
+# ─── Install mlx-audio (Apple Silicon) ───────────────────────────────────────
 
 MLX_TTS="say"
 ARCH=$(uname -m)
@@ -66,13 +66,13 @@ if [ "$ARCH" = "arm64" ]; then
       else
         if command -v uv &>/dev/null; then
           info "Installing via uv..."
-          uv pip install mlx-audio > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via uv" || warn "Failed to install mlx-audio — using macOS say"
+          uv pip install "mlx-audio[kokoro]" > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via uv" || warn "Failed to install mlx-audio — using macOS say"
         elif command -v pip3 &>/dev/null; then
           info "Installing via pip3 (this may take a minute)..."
-          pip3 install mlx-audio > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via pip3" || warn "Failed to install mlx-audio — using macOS say"
+          pip3 install "mlx-audio[kokoro]" > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via pip3" || warn "Failed to install mlx-audio — using macOS say"
         elif command -v pip &>/dev/null; then
           info "Installing via pip..."
-          pip install mlx-audio > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via pip" || warn "Failed to install mlx-audio — using macOS say"
+          pip install "mlx-audio[kokoro]" > /dev/null 2>&1 && MLX_TTS="mlx" && ok "Installed mlx-audio via pip" || warn "Failed to install mlx-audio — using macOS say"
         else
           warn "Neither uv, pip3, nor pip found — cannot install mlx-audio. Using macOS say"
         fi
@@ -313,7 +313,7 @@ echo ""
 # Test sound
 if [ "$MLX_TTS" = "mlx" ]; then
   info "Playing test narration with Kokoro voice..."
-  python3 -m mlx_audio.tts.generate --model "mlx-community/Kokoro-82M-bf16" --text "Claude Code Narrator installed. Jarvis mode ready." --voice "af_heart" --output "/tmp/claude-narrator-test.wav" 2>/dev/null && afplay "/tmp/claude-narrator-test.wav" &
+  python3 -m mlx_audio.tts.generate --model "mlx-community/Kokoro-82M-bf16" --text "Claude Code Narrator installed. Jarvis mode ready." --voice "af_heart" --output "/tmp/claude-narrator-test-dir" 2>/dev/null && afplay "/tmp/claude-narrator-test-dir/audio_000.wav" &
 elif command -v say &>/dev/null; then
   info "Playing test narration..."
   say -v "${NARRATOR_VOICE:-Samantha}" "Claude Code Narrator installed" &

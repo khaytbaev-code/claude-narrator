@@ -609,13 +609,21 @@ function speakWithMlx(text, config, isDestructiveAction, sessionNum) {
   const tmpFile = path.join(TMP_DIR, `${TMP_PREFIX}sess${sessionNum}-${hash}.wav`);
 
   try {
+    // mlx-audio writes to <output>/audio_000.wav, not <output> directly
+    const mlxOutputDir = tmpFile + '.d';
+    const mlxActualFile = path.join(mlxOutputDir, 'audio_000.wav');
+
     if (!fs.existsSync(tmpFile)) {
-      // Escape text via JSON.stringify to prevent shell injection
       const escaped = JSON.stringify(text);
-      execSync(`python3 -m mlx_audio.tts.generate --model ${JSON.stringify(model)} --text ${escaped} --voice ${JSON.stringify(voice)} --speed ${speed} --output ${JSON.stringify(tmpFile)}`, {
+      execSync(`python3 -m mlx_audio.tts.generate --model ${JSON.stringify(model)} --text ${escaped} --voice ${JSON.stringify(voice)} --speed ${speed} --output ${JSON.stringify(mlxOutputDir)}`, {
         timeout: 5000,
         stdio: 'ignore',
       });
+      // Move the actual wav to the expected cache path
+      if (fs.existsSync(mlxActualFile)) {
+        fs.renameSync(mlxActualFile, tmpFile);
+        try { fs.rmdirSync(mlxOutputDir); } catch { /* ignore */ }
+      }
     }
     playFile(tmpFile, volume, sessionNum);
   } catch {
