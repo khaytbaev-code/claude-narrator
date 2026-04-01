@@ -49,7 +49,7 @@ rm -f "$MUTE_FILE"
 # ─── Remove hook from settings.json ─────────────────────────────────────────
 
 if [ -f "$SETTINGS_FILE" ]; then
-  info "Removing PreToolUse hook from settings.json..."
+  info "Removing hooks from settings.json..."
   node -e "
     const fs = require('fs');
     const raw = fs.readFileSync('$SETTINGS_FILE', 'utf8');
@@ -59,19 +59,22 @@ if [ -f "$SETTINGS_FILE" ]; then
     } catch {
       process.exit(0);
     }
-    if (settings.hooks && Array.isArray(settings.hooks.PreToolUse)) {
-      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
-        h => !(h.command && h.command.includes('narrator.js'))
-      );
-      if (settings.hooks.PreToolUse.length === 0) {
-        delete settings.hooks.PreToolUse;
-      }
-      if (Object.keys(settings.hooks).length === 0) {
-        delete settings.hooks;
+    for (const hookType of ['PreToolUse', 'PostToolUse']) {
+      if (settings.hooks && Array.isArray(settings.hooks[hookType])) {
+        settings.hooks[hookType] = settings.hooks[hookType].filter(
+          h => !(h.command && h.command.includes('narrator.js'))
+             && !(h.hooks && h.hooks.some(sub => sub.command && sub.command.includes('narrator.js')))
+        );
+        if (settings.hooks[hookType].length === 0) {
+          delete settings.hooks[hookType];
+        }
       }
     }
+    if (settings.hooks && Object.keys(settings.hooks).length === 0) {
+      delete settings.hooks;
+    }
     fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2) + '\n');
-  " 2>/dev/null && ok "Removed hook from settings.json" || warn "Could not update settings.json"
+  " 2>/dev/null && ok "Removed hooks from settings.json" || warn "Could not update settings.json"
 fi
 
 # ─── Remove shell aliases ───────────────────────────────────────────────────

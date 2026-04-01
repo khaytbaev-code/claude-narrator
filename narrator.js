@@ -31,6 +31,7 @@ const DEFAULTS = {
   elevenlabs: null,           // { apiKey, voiceId?, model? }
   narrateTools: ['Bash', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'Agent'],
   skipTools: [],
+  narrateFailures: true,
   maxContextItems: 15,
   repetitionThreshold: 3,
   destructiveAlertSound: '/System/Library/Sounds/Basso.aiff',
@@ -420,13 +421,13 @@ function ensureCacheDir() {
   } catch { /* ignore */ }
 }
 
-function speakWithSay(text, config, isDestructiveAction) {
+function speakWithSay(text, config, isDestructiveAction, sessionNum) {
   const voice = config.voice || DEFAULTS.voice;
   const rate = isDestructiveAction ? 190 : (config.rate || DEFAULTS.rate);
   const volume = config.volume ?? DEFAULTS.volume;
 
   const hash = crypto.createHash('md5').update(`say:${voice}:${rate}:${text}`).digest('hex').slice(0, 12);
-  const tmpFile = path.join(TMP_DIR, `${TMP_PREFIX}${hash}.aiff`);
+  const tmpFile = path.join(TMP_DIR, `${TMP_PREFIX}sess${sessionNum}-${hash}.aiff`);
 
   try {
     if (!fs.existsSync(tmpFile)) {
@@ -435,14 +436,14 @@ function speakWithSay(text, config, isDestructiveAction) {
         stdio: 'ignore',
       });
     }
-    playFile(tmpFile, config.volume ?? DEFAULTS.volume);
+    playFile(tmpFile, config.volume ?? DEFAULTS.volume, sessionNum);
   } catch { /* never block */ }
 }
 
-function speakWithElevenLabs(text, config, isDestructiveAction) {
+function speakWithElevenLabs(text, config, isDestructiveAction, sessionNum) {
   const el = config.elevenlabs || {};
   const apiKey = el.apiKey || process.env.ELEVENLABS_API_KEY;
-  if (!apiKey) return speakWithSay(text, config, isDestructiveAction);
+  if (!apiKey) return speakWithSay(text, config, isDestructiveAction, sessionNum);
 
   const voiceId = el.voiceId || 'EXAVITQu4vr4xnSDxMaL'; // Sarah
   const model = el.model || 'eleven_turbo_v2_5';
@@ -455,7 +456,7 @@ function speakWithElevenLabs(text, config, isDestructiveAction) {
 
   // Cache hit — play immediately
   if (fs.existsSync(cacheFile)) {
-    playFile(cacheFile, volume);
+    playFile(cacheFile, volume, sessionNum);
     return;
   }
 
@@ -480,7 +481,7 @@ function speakWithElevenLabs(text, config, isDestructiveAction) {
   }, (res) => {
     if (res.statusCode !== 200) {
       // Fallback to say on API error
-      speakWithSay(text, config, isDestructiveAction);
+      speakWithSay(text, config, isDestructiveAction, sessionNum);
       res.resume();
       return;
     }
@@ -490,34 +491,41 @@ function speakWithElevenLabs(text, config, isDestructiveAction) {
       try {
         const audio = Buffer.concat(chunks);
         fs.writeFileSync(cacheFile, audio);
-        playFile(cacheFile, volume);
+        playFile(cacheFile, volume, sessionNum);
       } catch { /* ignore */ }
     });
   });
 
   req.on('error', () => {
     // Fallback to say
-    speakWithSay(text, config, isDestructiveAction);
+    speakWithSay(text, config, isDestructiveAction, sessionNum);
   });
   req.on('timeout', () => {
     req.destroy();
-    speakWithSay(text, config, isDestructiveAction);
+    speakWithSay(text, config, isDestructiveAction, sessionNum);
   });
   req.write(body);
   req.end();
 }
 
-function speak(text, config, isDestructiveAction) {
+function speak(text, config, isDestructiveAction, sessionNum) {
   const tts = config.tts || DEFAULTS.tts;
   if (tts === 'elevenlabs') {
-    speakWithElevenLabs(text, config, isDestructiveAction);
+    speakWithElevenLabs(text, config, isDestructiveAction, sessionNum);
   } else {
-    speakWithSay(text, config, isDestructiveAction);
+    speakWithSay(text, config, isDestructiveAction, sessionNum);
   }
 }
 
-function playFile(filePath, volume) {
+function playFile(filePath, volume, sessionNum) {
   try {
+    // Kill any previous narrator audio for this session
+    try {
+      execSync(`pkill -f "afplay.*/tmp/claude-narrator-.*sess${sessionNum}"`, {
+        stdio: 'ignore', timeout: 500
+      });
+    } catch { /* no process to kill = fine */ }
+
     const player = spawn('afplay', ['--volume', String(volume), filePath], {
       detached: true,
       stdio: 'ignore',
@@ -695,7 +703,7 @@ async function main() {
   }
 
   // Speak
-  speak(text, config, destructive);
+  speak(text, config, destructive, sessionNum);
 
   // Save state
   saveState(stPath, state);
@@ -704,8 +712,66 @@ async function main() {
   if (Math.random() < 0.05) cleanupOldTempFiles();
 }
 
-// Top-level safety wrapper
-main().catch(() => {
-  // If anything goes wrong, we already wrote stdin to stdout
-  // Just exit cleanly
-});
+// ─── PostToolUse — failure narration ─────────────────────────────────────────
+
+async function mainPost() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const rawInput = Buffer.concat(chunks).toString('utf8');
+  process.stdout.write(rawInput);
+
+  let input;
+  try { input = JSON.parse(rawInput); } catch { return; }
+
+  if (fs.existsSync(MUTE_FILE)) return;
+  const config = loadConfig();
+  if (!config.enabled) return;
+  if (!(config.narrateFailures ?? DEFAULTS.narrateFailures)) return;
+
+  const toolName = input.tool_name;
+  const toolOutput = input.tool_output || {};
+
+  // Only narrate Bash failures
+  if (toolName !== 'Bash') return;
+  const exitCode = toolOutput.exitCode ?? toolOutput.exit_code;
+  if (exitCode === 0 || exitCode === undefined || exitCode === null) return;
+
+  // Detect what kind of failure
+  const cmd = (input.tool_input?.command || '').trim();
+  let text = 'That failed';
+  for (const [rx] of BASH_TEMPLATES) {
+    if (/test|spec|jest|pytest|cargo\s+test|go\s+test/.test(rx.source) && rx.test(cmd)) {
+      text = 'Tests failed';
+      break;
+    }
+    if (/build/.test(rx.source) && rx.test(cmd)) {
+      text = 'Build failed';
+      break;
+    }
+  }
+
+  const sessionNum = getSessionNumber();
+
+  // Override voice for non-primary sessions
+  if (sessionNum > 0) {
+    const extras = config.sessionVoices || DEFAULTS.sessionVoices;
+    const sv = extras[(sessionNum - 1) % extras.length];
+    if (sv) {
+      config.voice = sv.voice || config.voice;
+      config.rate = sv.rate || config.rate;
+    }
+  }
+
+  const failConfig = { ...config, volume: (config.volume ?? 0.5) * 0.8 };
+  playAlert(failConfig);
+  await new Promise((r) => setTimeout(r, 200));
+  speak(text, failConfig, true, sessionNum);
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+if (process.argv.includes('--post')) {
+  mainPost().catch(() => {});
+} else {
+  main().catch(() => {});
+}

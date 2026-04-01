@@ -101,9 +101,7 @@ fi
 
 # ─── Register hook in settings.json ─────────────────────────────────────────
 
-info "Registering PreToolUse hook..."
-
-HOOK_ENTRY="{\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"node $SCRIPTS_DIR/narrator.js\"}]}"
+info "Registering hooks..."
 
 if [ -f "$SETTINGS_FILE" ]; then
   # Read existing settings
@@ -144,9 +142,17 @@ if [ -f "$SETTINGS_FILE" ]; then
           command: 'node $SCRIPTS_DIR/narrator.js'
         }]
       });
+      if (!Array.isArray(settings.hooks.PostToolUse)) settings.hooks.PostToolUse = [];
+      settings.hooks.PostToolUse.push({
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'node $SCRIPTS_DIR/narrator.js --post'
+        }]
+      });
       fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2) + '\n');
     " <<< "$EXISTING"
-    ok "Registered PreToolUse hook in settings.json"
+    ok "Registered PreToolUse and PostToolUse hooks in settings.json"
   fi
 else
   # Create new settings file with hook
@@ -160,12 +166,19 @@ else
             type: 'command',
             command: 'node $SCRIPTS_DIR/narrator.js'
           }]
+        }],
+        PostToolUse: [{
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: 'node $SCRIPTS_DIR/narrator.js --post'
+          }]
         }]
       }
     };
     fs.writeFileSync('$SETTINGS_FILE', JSON.stringify(settings, null, 2) + '\n');
   "
-  ok "Created settings.json with PreToolUse hook"
+  ok "Created settings.json with PreToolUse and PostToolUse hooks"
 fi
 
 # ─── Shell aliases ───────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # Claude Code Narrator
 
-Audio co-pilot for Claude Code. Hooks into PreToolUse to speak what Claude is about to do before each tool execution.
+Audio co-pilot for Claude Code. Hooks into PreToolUse to speak what Claude is about to do before each tool execution, and PostToolUse to narrate failures (e.g., "Tests failed", "Build failed").
 
 ## Architecture
 
@@ -9,11 +9,16 @@ Claude Code action
        |
        v
 PreToolUse hook → narrator.js (stdin JSON → narration → stdout passthrough)
-       |
+       |                         Kill-and-replace: pkill previous afplay for this session
        +-- Session detection (PPID-based registry)
        +-- Per-session voice & phrasing selection
        +-- macOS `say` (default, free)
        +-- ElevenLabs API (optional, cached to ~/.claude/narrator-cache/)
+
+PostToolUse hook → narrator.js --post (narrates Bash failures only)
+       |
+       +-- Non-zero exit code → "That failed" / "Tests failed" / "Build failed"
+       +-- Success → silent (no noise on happy path)
 ```
 
 **Single file, zero dependencies.** Pure Node.js 18+ stdlib. No npm, no package.json.
@@ -26,12 +31,13 @@ narrator.js          # Main hook script. Reads JSON from stdin,
                      #   Contains: session detection, config loading, state management,
                      #   narration generation, ~40 bash command templates, path intelligence,
                      #   repetition suppression, destructive action alerts, context awareness,
-                     #   ElevenLabs caching
+                     #   ElevenLabs caching, kill-and-replace audio overlap prevention,
+                     #   PostToolUse failure narration (--post flag)
 narrator.json        # Default config (Samantha voice, 210 WPM, say engine)
 install.sh           # Non-destructive installer: copies script to ~/.claude/scripts/,
-                     #   registers PreToolUse hook in settings.json (matcher + hooks format),
+                     #   registers PreToolUse + PostToolUse hooks in settings.json,
                      #   installs slash commands, adds shell aliases. Won't overwrite existing config
-uninstall.sh         # Clean uninstaller: removes script, hook, commands, aliases, temp files.
+uninstall.sh         # Clean uninstaller: removes script, hooks, commands, aliases, temp files.
                      #   Optionally removes config and ElevenLabs cache
 commands/
   narrator-mute.md   # /narrator-mute slash command (touch ~/.claude/narrator-muted)
@@ -45,10 +51,10 @@ When installed, files go to:
 - `~/.claude/scripts/narrator.js` — the hook script
 - `~/.claude/narrator.json` — user config
 - `~/.claude/commands/narrator-*.md` — slash commands
-- `~/.claude/settings.json` — PreToolUse hook registration
+- `~/.claude/settings.json` — PreToolUse + PostToolUse hook registration
 - `~/.claude/narrator-muted` — mute sentinel file (presence = muted)
 - `~/.claude/narrator-cache/` — ElevenLabs audio cache (7-day TTL)
-- `/tmp/claude-narrator-*.aiff` — macOS say temp files (5-min TTL)
+- `/tmp/claude-narrator-sess*-*.aiff` — macOS say temp files (5-min TTL, session-scoped)
 - `/tmp/claude-narrator-state-N.json` — per-session repetition/context state
 - `/tmp/claude-narrator-sessions.json` — active session registry
 
@@ -61,6 +67,8 @@ When installed, files go to:
 - **Repetition suppression**: Same tool 1-2x = full narration, 3rd = batch summary, 4th+ = silent. Resets after 10s gap or tool type change
 - **Destructive alerts**: Bash commands matching rm -rf, force push, DROP TABLE etc. trigger system alert sound before narration at slower rate
 - **ElevenLabs caching**: MD5 hash of (engine:voice:rate:text) for macOS say, (el:voiceId:model:text) for ElevenLabs. Prevents redundant API calls
+- **Kill-and-replace audio**: Before each new narration, `pkill` kills any previous afplay for the same session. Prevents audio overlap from rapid tool calls. Session-scoped via filename pattern so concurrent sessions don't interfere
+- **PostToolUse failure narration**: Only narrates Bash failures (non-zero exit code). Detects test/build commands for specific messages. Success = silent. Plays alert sound + spoken failure at 80% volume
 
 ## Multi-Session Voices
 
@@ -87,12 +95,13 @@ Sessions are tracked via PPID in `/tmp/claude-narrator-sessions.json` and expire
 - `sessionVoices` (array) — voices for sessions 1+ [{ voice, rate, elevenLabsVoiceId? }]
 - `narrateTools` (string[]) — tools to narrate
 - `skipTools` (string[]) — tools to skip
+- `narrateFailures` (bool, default true) — speak Bash failures via PostToolUse hook
 - `repetitionThreshold` (int, default 3) — same-tool count before batching
 
 ## Development Notes
 
 - macOS only (uses `say` + `afplay` commands)
-- Audio playback is fire-and-forget (detached child process, unref'd)
+- Audio playback uses kill-and-replace (pkill previous session afplay, then spawn new detached player)
 - Temp file cleanup runs probabilistically (5% chance per invocation)
 - State files at /tmp/ are ephemeral by design — survive session but not reboot
 - ElevenLabs fallback: on API error or timeout (4s), falls back to macOS say
