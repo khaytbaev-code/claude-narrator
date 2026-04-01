@@ -182,9 +182,8 @@ Downloads are verified with SHA-256 checksums (published by the Piper project) v
 ```
 function speakWithPiper(text, config, isDestructiveAction, sessionNum):
   1. Hash text for cache key (same pattern as say/elevenlabs)
-  2. Generate WAV via spawn (NOT shell pipe — avoids injection risk):
-     const proc = spawnSync(piperBinary, ['--model', model, '--output_file', tmpFile]);
-     proc.stdin.write(text); proc.stdin.end();
+  2. Generate WAV via spawnSync with input option (NOT shell pipe — avoids injection risk):
+     spawnSync(piperBinary, ['--model', model, '--output_file', tmpFile], { input: text });
      // Uses spawnSync like speakWithSay uses execSync — acceptable for ~100-200ms synthesis
   3. Play via playFile() (same kill-and-replace, same session scoping)
   4. On any error: fall back to speakWithSay()
