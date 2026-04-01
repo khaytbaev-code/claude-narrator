@@ -107,21 +107,22 @@ if [ -f "$SETTINGS_FILE" ]; then
   # Read existing settings
   EXISTING=$(cat "$SETTINGS_FILE")
 
-  # Check if hook already registered
+  # Check if both hooks already registered
   if echo "$EXISTING" | node -e "
     const fs = require('fs');
     const input = fs.readFileSync('/dev/stdin', 'utf8');
     try {
       const settings = JSON.parse(input);
-      const hooks = settings.hooks?.PreToolUse || [];
-      const exists = hooks.some(h =>
+      const hasNarrator = (hooks) => (hooks || []).some(h =>
         (h.command && h.command.includes('narrator.js')) ||
         (h.hooks && h.hooks.some(sub => sub.command && sub.command.includes('narrator.js')))
       );
-      process.exit(exists ? 0 : 1);
+      const pre = hasNarrator(settings.hooks?.PreToolUse);
+      const post = hasNarrator(settings.hooks?.PostToolUse);
+      process.exit(pre && post ? 0 : 1);
     } catch { process.exit(1); }
   " 2>/dev/null; then
-    warn "Hook already registered in settings.json — skipping"
+    warn "Hooks already registered in settings.json — skipping"
   else
     # Merge hook entry
     node -e "
