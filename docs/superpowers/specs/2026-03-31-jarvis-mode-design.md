@@ -67,18 +67,22 @@ Each action gets 4-5 varied phrasings that rotate, replacing the current single 
 
 The existing `askStyle()` prefix system applies on top, producing combinations like "Mind if I peek at auth service dot py?"
 
+**Rotation mechanism:** Verb phrase selection uses a separate counter (`state.verbIndex`) stored in the per-session state file, independent from the prefix rotation counter (`prefixIndex`). This prevents correlated pairings. The counter wraps modulo pool size with last-used exclusion (skip if same as previous).
+
 ### Pattern detection
 
 Lightweight checks on `state.recentActions` (already tracked, last 15 actions):
 
 | Pattern | Detection | Narration modifier |
 |---------|-----------|-------------------|
-| Debugging loop | 3+ cycles of Read -> Edit -> Bash(test) | "Let me try again..." / "One more attempt..." |
+| Debugging loop | 3+ cycles of Read -> Edit -> Bash(test) where last Bash failed (exit code stored in state by PostToolUse) | "Let me try again..." / "One more attempt..." |
 | Exploration | 4+ consecutive Reads | "Still looking..." / "Almost found it..." |
 | Refactoring pass | 3+ consecutive Edits on related files | "Another one to update..." |
 | Wrapping up | Edit followed by git commands | "Finishing up..." |
 
 Pattern detection runs on every invocation but only modifies narration text — no side effects.
+
+**Cross-hook state sharing:** The debugging loop pattern needs to know if the last Bash command failed. `mainPost()` stores `state.lastBashExitCode` in the per-session state file. `main()` reads it during pattern detection. The state file is already shared between both paths via `statePath(sessionNum)`.
 
 ### Warm connectors
 
@@ -123,11 +127,15 @@ User message (per milestone):
    Recent context: <last 5 actions summary>"
 ```
 
-### Fallback chain
+### Execution model & fallback chain
 
-1. Gemini responds in <2s -> use generated text
-2. Gemini slow (>2s) or HTTP error -> fall back to fast tier template
-3. No API key configured -> Rich Tier disabled, fast tier only
+**PreToolUse milestones (task transition, completion summary, debugging loop):**
+The fast tier fires immediately (fire-and-forget, ~0ms). Gemini is called concurrently. If Gemini returns within 2s and audio hasn't started playing yet, the Gemini text replaces the fast tier text for speech. If Gemini is slow, the fast tier narration has already played — Gemini result is discarded. No audio silence gap.
+
+**PostToolUse milestones (failure reaction, test/build success):**
+These are retrospective events — 1-2s wait is tolerable. Gemini is called with `await` and a 2s timeout via `Promise.race`. On timeout or error, fall back to fast tier template ("Tests failed" / "That failed").
+
+**No API key configured:** Rich Tier disabled entirely, fast tier only.
 
 No retry logic. Fire once, use result or fall back. Simple.
 
@@ -167,17 +175,26 @@ install.sh:
 
 If user declines or Piper is unavailable, macOS `say` works as before.
 
+Downloads are verified with SHA-256 checksums (published by the Piper project) via `shasum -a 256 -c` before marking installation complete.
+
 ### speakWithPiper implementation
 
 ```
 function speakWithPiper(text, config, isDestructiveAction, sessionNum):
   1. Hash text for cache key (same pattern as say/elevenlabs)
-  2. Generate WAV: echo text | piper --model <model> --output_file <tmpFile>
+  2. Generate WAV via spawn (NOT shell pipe — avoids injection risk):
+     const proc = spawnSync(piperBinary, ['--model', model, '--output_file', tmpFile]);
+     proc.stdin.write(text); proc.stdin.end();
+     // Uses spawnSync like speakWithSay uses execSync — acceptable for ~100-200ms synthesis
   3. Play via playFile() (same kill-and-replace, same session scoping)
   4. On any error: fall back to speakWithSay()
 ```
 
 Temp files follow the same pattern: `/tmp/claude-narrator-sess{N}-{hash}.wav`
+
+### Multi-session voice limitation
+
+Piper voices are distinct model files, not named voices like macOS `say`. Multi-session voice differentiation is **not supported** for Piper in this release — all sessions use the same model. Rate differentiation (Piper's `--length-scale` flag) is still applied per session for slight variation. Full multi-session Piper voice support would require downloading multiple model files and is deferred.
 
 ### Piper config
 
@@ -215,6 +232,7 @@ All new fields are optional with backward-compatible defaults:
 ```
 
 - `jarvis.enabled: false` by default — must opt in with API key
+- `jarvis.model` — configurable so users can update the model ID if the default alias changes or a newer model is released. Verify exact model ID against [Gemini API docs](https://ai.google.dev/gemini-api/docs/models) before shipping — dated preview IDs (e.g., `gemini-2.5-flash-lite-preview-06-17`) may be needed if the short alias isn't live yet.
 - `jarvis.personality` — reserved for future use (warm/dry/witty), currently only "warm"
 - `piper` — only read if `tts: "piper"`
 
@@ -230,7 +248,7 @@ All new fields are optional with backward-compatible defaults:
 
 ### Estimated size
 
-- narrator.js: ~780 lines -> ~950 lines (within 1000 line budget)
+- narrator.js: ~780 lines -> ~1050 lines (budget raised to 1100; use shared helpers and lookup tables to compress where possible)
 - No new files besides Piper binary/model (downloaded, not committed)
 
 ## Breaking Changes
@@ -240,6 +258,11 @@ None. Every new feature is behind config flags:
 - No `jarvis.apiKey` set -> Rich Tier disabled, fast tier only
 - `tts: "say"` (default) -> macOS say as before
 - Existing installs work identically without any config changes
+
+## Implementation Notes
+
+- `cleanupOldTempFiles()` must be extended to also match `.wav` files (Piper output). Simplest fix: check `f.startsWith(TMP_PREFIX)` without extension filter, since both `.aiff` and `.wav` share the prefix.
+- `inferArea()` contains hardcoded domain terms from a specific project. Should be generalized to derive context from path components. Tracked as a separate cleanup — not blocking for Jarvis Mode.
 
 ## Testing Plan
 
