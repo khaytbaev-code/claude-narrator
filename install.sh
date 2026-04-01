@@ -105,6 +105,7 @@ else
   curl -fsSL "$REPO_URL/commands/narrator-mute.md" -o "$SOURCE_DIR/commands/narrator-mute.md" 2>/dev/null || true
   curl -fsSL "$REPO_URL/commands/narrator-unmute.md" -o "$SOURCE_DIR/commands/narrator-unmute.md" 2>/dev/null || true
   curl -fsSL "$REPO_URL/commands/narrator-voice.md" -o "$SOURCE_DIR/commands/narrator-voice.md" 2>/dev/null || true
+  curl -fsSL "$REPO_URL/commands/narrator-config.md" -o "$SOURCE_DIR/commands/narrator-config.md" 2>/dev/null || true
   ok "Downloaded narrator files"
 fi
 

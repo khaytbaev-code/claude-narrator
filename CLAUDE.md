@@ -53,9 +53,10 @@ install.sh           # Installer: auto-installs mlx-audio on Apple Silicon,
                      #   copies script, registers hooks, installs commands, adds aliases
 uninstall.sh         # Clean uninstaller: removes everything, offers mlx-audio uninstall
 commands/
+  narrator-config.md # /narrator-config unified settings command
   narrator-mute.md   # /narrator-mute slash command
   narrator-unmute.md # /narrator-unmute slash command
-  narrator-voice.md  # /narrator-voice slash command
+  narrator-voice.md  # /narrator-voice shortcut (delegates to narrator-config voice)
 ```
 
 ## Installed Locations
@@ -100,6 +101,7 @@ commands/
 - `tts` ("mlx" | "say" | "elevenlabs") — TTS engine. Default "mlx" on Apple Silicon
 - `mlx` (object) — { model, voice, speed }. Kokoro TTS settings
 - `jarvis` (object) — { enabled, apiKey, model, personality, timeoutMs }. Gemini milestone narration
+  - `personality`: "warm" (default), "professional", "playful", "terse"
 - `voice` (string, default "Samantha") — macOS say voice (fallback)
 - `rate` (int, default 210) — words per minute for macOS say
 - `volume` (float, default 0.5) — playback volume 0.0-1.0
@@ -110,6 +112,28 @@ commands/
 - `narrateFailures` (bool, default true) — speak Bash failures/successes via PostToolUse
 - `narrateStop` (bool, default true) — speak turn-completion narration via Stop hook
 - `repetitionThreshold` (int, default 3) — same-tool count before batching
+
+## Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/narrator-config` | Unified settings — voice, speed, volume, engine, jarvis, tools, etc. |
+| `/narrator-config voice [name]` | Change voice (lists Kokoro/say/ElevenLabs voices) |
+| `/narrator-config speed <0.5-2.0>` | Change TTS speed |
+| `/narrator-config volume <0.0-1.0>` | Change playback volume |
+| `/narrator-config engine <mlx\|say\|elevenlabs>` | Switch TTS engine |
+| `/narrator-config jarvis <on\|off>` | Toggle Gemini milestone narration |
+| `/narrator-config jarvis key <key>` | Set Gemini API key |
+| `/narrator-config jarvis model <model>` | Set Gemini model |
+| `/narrator-config jarvis personality <warm\|professional\|playful\|terse>` | Set narration style |
+| `/narrator-config elevenlabs key <key>` | Set ElevenLabs API key |
+| `/narrator-config tools [add\|remove] <tool>` | Configure narrated tools |
+| `/narrator-config failures <on\|off>` | Toggle failure narration |
+| `/narrator-config stop <on\|off>` | Toggle turn-completion narration |
+| `/narrator-config reset` | Reset all settings to defaults |
+| `/narrator-mute` | Mute narrator |
+| `/narrator-unmute` | Unmute narrator |
+| `/narrator-voice [name]` | Shortcut for `/narrator-config voice` |
 
 ## Development Notes
 

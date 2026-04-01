@@ -35,7 +35,7 @@ fi
 
 # ─── Remove slash commands ───────────────────────────────────────────────────
 
-for cmd in narrator-mute narrator-unmute narrator-voice; do
+for cmd in narrator-mute narrator-unmute narrator-voice narrator-config; do
   if [ -f "$COMMANDS_DIR/$cmd.md" ]; then
     rm -f "$COMMANDS_DIR/$cmd.md"
     ok "Removed $cmd.md"
@@ -90,9 +90,11 @@ done
 
 # ─── Clean up temp files ────────────────────────────────────────────────────
 
-TEMP_COUNT=$(ls /tmp/claude-narrator-*.aiff 2>/dev/null | wc -l || echo 0)
+TEMP_COUNT=$(ls /tmp/claude-narrator-*.aiff /tmp/claude-narrator-*.wav 2>/dev/null | wc -l || echo 0)
 rm -f /tmp/claude-narrator-*.aiff
-rm -f /tmp/claude-narrator-state.json
+rm -f /tmp/claude-narrator-*.wav
+rm -f /tmp/claude-narrator-state*.json
+rm -f /tmp/claude-narrator-sessions.json
 if [ "$TEMP_COUNT" -gt 0 ]; then
   ok "Cleaned up $TEMP_COUNT temp files"
 fi

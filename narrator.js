@@ -552,10 +552,20 @@ function callGemini(prompt, config) {
 
   const model = jarvis.model || DEFAULTS.jarvis.model;
   const timeoutMs = jarvis.timeoutMs || DEFAULTS.jarvis.timeoutMs;
+  const personality = jarvis.personality || DEFAULTS.jarvis.personality;
+
+  const PERSONALITY_PROMPTS = {
+    warm: 'You are Jarvis, a warm and conversational voice assistant for a developer. Generate ONE short sentence (max 15 words) narrating what just happened or what is about to happen. Be warm but not silly.',
+    professional: 'You are a professional voice assistant for a developer. Generate ONE short, precise sentence (max 15 words) narrating the current action. Be concise and direct.',
+    playful: 'You are a playful voice assistant for a developer. Generate ONE short, witty sentence (max 15 words) narrating what is happening. Light humor is welcome.',
+    terse: 'You are a minimal voice assistant. Generate ONE ultra-short sentence (max 8 words) stating the action. No filler words.',
+  };
+
+  const personalityPrompt = PERSONALITY_PROMPTS[personality] || PERSONALITY_PROMPTS.warm;
 
   const body = JSON.stringify({
     system_instruction: {
-      parts: [{ text: 'You are Jarvis, a warm and conversational voice assistant for a developer. Generate ONE short sentence (max 15 words) narrating what just happened or what is about to happen. Be warm but not silly. No emojis. No code. Written to be spoken aloud, so write for the ear, not the eye.' }],
+      parts: [{ text: `${personalityPrompt} No emojis. No code. Written to be spoken aloud, so write for the ear, not the eye.` }],
     },
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { maxOutputTokens: 60, temperature: 0.7 },
