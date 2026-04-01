@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
-// Claude Code Narrator — Audio co-pilot for Claude Code
-// Zero dependencies. Pure Node.js stdlib. macOS only (uses `say` + `afplay`).
+// Claude Code Narrator — Jarvis-like audio co-pilot for Claude Code
+// Zero JS dependencies. Pure Node.js 18+ stdlib. macOS only (uses `afplay`).
+// TTS: mlx-audio Kokoro (default, Apple Silicon) | macOS say (fallback) | ElevenLabs (premium)
+// Rich Tier: Gemini 2.5 Flash-Lite for milestone narration (optional)
 // Reads hook JSON from stdin, speaks a narration, outputs JSON to stdout.
 
 'use strict';
@@ -27,20 +29,30 @@ const DEFAULTS = {
   voice: 'Samantha',
   rate: 210,
   volume: 0.5,
-  tts: 'say',                // 'say' (macOS built-in) or 'elevenlabs'
+  tts: 'mlx',                // 'mlx' (default) | 'say' (fallback) | 'elevenlabs'
+  mlx: {
+    model: 'mlx-community/Kokoro-82M-bf16',
+    voice: 'af_heart',
+    speed: 1.0,
+  },
   elevenlabs: null,           // { apiKey, voiceId?, model? }
+  jarvis: {
+    enabled: false,
+    apiKey: '',
+    model: 'gemini-2.5-flash-lite',
+    personality: 'warm',
+    timeoutMs: 2000,
+  },
   narrateTools: ['Bash', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'Agent'],
   skipTools: [],
   narrateFailures: true,
   maxContextItems: 15,
   repetitionThreshold: 3,
   destructiveAlertSound: '/System/Library/Sounds/Basso.aiff',
-  // Extra voices for concurrent sessions. Session 0 uses main voice/rate above.
-  // Each entry: { voice, rate } for say, or { voice, rate, elevenLabsVoiceId } for ElevenLabs
   sessionVoices: [
-    { voice: 'Daniel (Enhanced)', rate: 200 },
-    { voice: 'Karen (Enhanced)', rate: 205 },
-    { voice: 'Tessa (Enhanced)', rate: 200 },
+    { voice: 'Daniel (Enhanced)', mlxVoice: 'am_adam', rate: 200 },
+    { voice: 'Karen (Enhanced)', mlxVoice: 'bf_emma', rate: 205 },
+    { voice: 'Tessa (Enhanced)', mlxVoice: 'am_michael', rate: 200 },
   ],
 };
 
@@ -72,10 +84,8 @@ const DESTRUCTIVE = [
 ];
 
 // ─── Session detection ──────────────────────────────────────────────────────
-// Each Claude Code session gets a distinct voice + phrasing style so you can
-// tell concurrent sessions apart by ear.
 
-const STALE_SESSION_MS = 30 * 60 * 1000; // 30 min without activity → expired
+const STALE_SESSION_MS = 30 * 60 * 1000;
 
 function getSessionNumber() {
   const myId = String(process.ppid);
@@ -87,13 +97,10 @@ function getSessionNumber() {
   }
 
   const now = Date.now();
-
-  // Expire stale sessions
   for (const [pid, info] of Object.entries(registry.sessions)) {
     if (now - info.lastSeen > STALE_SESSION_MS) delete registry.sessions[pid];
   }
 
-  // Register or refresh this session
   if (!registry.sessions[myId]) {
     const used = new Set(Object.values(registry.sessions).map((s) => s.number));
     let num = 0;
@@ -113,7 +120,6 @@ function statePath(sessionNum) {
 }
 
 // ─── Conversational prefixes ────────────────────────────────────────────────
-// Each session rotates through its own set so concurrent sessions sound distinct.
 
 const SESSION_PREFIXES = [
   // Session 0 — casual permission
@@ -159,8 +165,38 @@ function askStyle(action) {
   return fn(action);
 }
 
+// ─── Rich phrasing pools ────────────────────────────────────────────────────
+// Each verb has multiple phrasings to rotate through for natural variation.
+
+const VERB_POOLS = {
+  read:    ['read', 'peek at', 'take a look at', 'check out', 'open up'],
+  edit:    ['edit', 'update', 'make a change to', 'tweak'],
+  create:  ['create', 'set up', 'write out'],
+  update:  ['update', 'modify', 'revise'],
+  search:  ['search for', 'look for', 'hunt for', 'scan for'],
+  find:    ['find', 'look for', 'locate'],
+  run:     ['run a command', 'execute something', 'fire off a command'],
+  test:    ['run the tests', 'kick off the test suite', 'see if the tests pass', 'check if that worked'],
+  build:   ['build the project', 'compile the project', 'kick off the build'],
+  install: ['install dependencies', 'grab the dependencies', 'pull in the packages'],
+  agent:   ['launch an agent', 'spin up a sub-agent', 'delegate to an agent'],
+};
+
+let verbIndices = {};
+
+function pickVerb(pool, state) {
+  const key = pool[0]; // Use first entry as key
+  const idx = state.verbIndex?.[key] || 0;
+  const pick = pool[idx % pool.length];
+  // Advance with last-used exclusion
+  let next = (idx + 1) % pool.length;
+  if (pool[next] === pick && pool.length > 1) next = (next + 1) % pool.length;
+  if (!state.verbIndex) state.verbIndex = {};
+  state.verbIndex[key] = next;
+  return pick;
+}
+
 // ─── Bash command templates ─────────────────────────────────────────────────
-// Values are now verb phrases (no prefix) — prefix is applied by askStyle()
 
 const BASH_TEMPLATES = [
   [/^git\s+status/,          'check git status'],
@@ -179,19 +215,19 @@ const BASH_TEMPLATES = [
   [/^git\s+stash/,           'stash changes'],
   [/^git\s+reset\s+--hard/,  'reset git history'],
   [/^git\s+clone/,           'clone a repository'],
-  [/^(npm|yarn|pnpm)\s+run\s+(test|spec)/i, 'run the tests'],
-  [/^(npm|yarn|pnpm)\s+test/i, 'run the tests'],
-  [/^pytest\b/,              'run the tests'],
-  [/^jest\b/,                'run the tests'],
-  [/^cargo\s+test/,          'run the tests'],
-  [/^go\s+test/,             'run the tests'],
-  [/^(npm|yarn|pnpm)\s+run\s+build/i, 'build the project'],
+  [/^(npm|yarn|pnpm)\s+run\s+(test|spec)/i, null, 'test'],
+  [/^(npm|yarn|pnpm)\s+test/i, null, 'test'],
+  [/^pytest\b/,              null, 'test'],
+  [/^jest\b/,                null, 'test'],
+  [/^cargo\s+test/,          null, 'test'],
+  [/^go\s+test/,             null, 'test'],
+  [/^(npm|yarn|pnpm)\s+run\s+build/i, null, 'build'],
   [/^(npm|yarn|pnpm)\s+run\s+dev/i,   'start the dev server'],
   [/^(npm|yarn|pnpm)\s+run\s+lint/i,  'run the linter'],
-  [/^(npm|pip|yarn|pnpm)\s+install/i,  'install dependencies'],
-  [/^pip\s+install/i,        'install dependencies'],
-  [/^cargo\s+build/,         'build the project'],
-  [/^go\s+build/,            'build the project'],
+  [/^(npm|pip|yarn|pnpm)\s+install/i,  null, 'install'],
+  [/^pip\s+install/i,        null, 'install'],
+  [/^cargo\s+build/,         null, 'build'],
+  [/^go\s+build/,            null, 'build'],
   [/^rm\s+-rf\b/,            'delete some files'],
   [/^rm\s/,                  'delete a file'],
   [/^ls\b/,                  'list the directory'],
@@ -212,13 +248,101 @@ const BASH_TEMPLATES = [
   [/^node\s/,                'run Node'],
 ];
 
+// ─── Pattern detection ──────────────────────────────────────────────────────
+
+function detectPattern(recentActions, state) {
+  if (recentActions.length < 3) return null;
+  const recent = recentActions.slice(-12);
+  const tools = recent.map((a) => a.tool);
+
+  // Debugging loop: 3+ cycles of Read → Edit → Bash(test) with failing tests
+  if (tools.length >= 9 && state.lastBashExitCode && state.lastBashExitCode !== 0) {
+    let cycles = 0;
+    for (let i = tools.length - 1; i >= 2; i -= 3) {
+      if (tools[i] === 'Bash' && tools[i - 1] === 'Edit' && tools[i - 2] === 'Read') cycles++;
+      else break;
+    }
+    if (cycles >= 3) return 'debugging';
+  }
+
+  // Exploration: 4+ consecutive Reads
+  const last4 = tools.slice(-4);
+  if (last4.length >= 4 && last4.every((t) => t === 'Read')) return 'exploring';
+
+  // Refactoring: 3+ consecutive Edits
+  const last3 = tools.slice(-3);
+  if (last3.length >= 3 && last3.every((t) => t === 'Edit')) return 'refactoring';
+
+  // Wrapping up: Edit followed by git command
+  if (tools.length >= 2) {
+    const prev = tools[tools.length - 2];
+    const curr = tools[tools.length - 1];
+    const lastTarget = recent[recent.length - 1]?.target || '';
+    if (prev === 'Edit' && curr === 'Bash' && /^git\s+(add|commit|push|status)/.test(lastTarget)) {
+      return 'wrapping-up';
+    }
+  }
+
+  return null;
+}
+
+const PATTERN_PHRASES = {
+  debugging:    ['Let me try again.', 'One more attempt.', 'Another go at it.'],
+  exploring:    ['Still looking...', 'Almost found it...', 'Digging deeper...'],
+  refactoring:  ['Another one to update.', 'Continuing the refactor.', 'One more change.'],
+  'wrapping-up': ['Finishing up.', 'Wrapping things up.', 'Almost done.'],
+};
+
+// ─── Warm connectors ────────────────────────────────────────────────────────
+
+const CONNECTORS = ['OK, ', 'Alright, ', 'Right, ', 'Now ', 'Next, '];
+let connectorIndex = 0;
+
+function maybeAddConnector(text, state, toolName) {
+  if (state.lastTool && state.lastTool !== toolName) {
+    const connector = CONNECTORS[connectorIndex % CONNECTORS.length];
+    connectorIndex++;
+    return connector.toLowerCase() + text.charAt(0).toLowerCase() + text.slice(1);
+  }
+  return text;
+}
+
+// ─── Milestone detection ────────────────────────────────────────────────────
+
+function detectMilestone(toolName, toolInput, state) {
+  const recentActions = state.recentActions || [];
+  if (recentActions.length < 3) return null;
+  const tools = recentActions.slice(-6).map((a) => a.tool);
+
+  // Task transition: tool type shifts after 3+ same-type actions
+  const lastTool = tools[tools.length - 1];
+  const sameBefore = tools.slice(0, -1).filter((t) => t === state.lastTool);
+  if (sameBefore.length >= 3 && lastTool !== state.lastTool) {
+    return { type: 'transition', from: state.lastTool, to: lastTool };
+  }
+
+  // Completion summary: git commit or 5+ edits followed by non-edit
+  if (toolName === 'Bash' && /^git\s+commit/.test(toolInput.command || '')) {
+    const editCount = recentActions.filter((a) => a.tool === 'Edit').length;
+    return { type: 'completion', editCount };
+  }
+
+  return null;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
-      return { ...DEFAULTS, ...JSON.parse(raw) };
+      const userConf = JSON.parse(raw);
+      return {
+        ...DEFAULTS,
+        ...userConf,
+        mlx: { ...DEFAULTS.mlx, ...(userConf.mlx || {}) },
+        jarvis: { ...DEFAULTS.jarvis, ...(userConf.jarvis || {}) },
+      };
     }
   } catch { /* fall through */ }
   return { ...DEFAULTS };
@@ -231,7 +355,7 @@ function loadState(stPath) {
       return JSON.parse(raw);
     }
   } catch { /* fall through */ }
-  return { lastTool: null, consecutiveCount: 0, lastTimestamp: 0, recentActions: [] };
+  return { lastTool: null, consecutiveCount: 0, lastTimestamp: 0, recentActions: [], verbIndex: {} };
 }
 
 function saveState(stPath, state) {
@@ -243,9 +367,7 @@ function saveState(stPath, state) {
 function friendlyPath(filePath) {
   if (!filePath) return '';
 
-  // Strip home dir prefix
   let p = filePath.replace(new RegExp(`^${HOME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), '~');
-  // Strip common project prefixes
   p = p.replace(/^~\/Documents\/projects\/[^/]+\//, '');
   p = p.replace(/^~\/[^/]+\//, '');
 
@@ -253,7 +375,6 @@ function friendlyPath(filePath) {
   const fileName = parts[parts.length - 1] || '';
   const parentDir = parts.length > 1 ? parts[parts.length - 2] : '';
 
-  // ── Index/page/layout files → "the [parent] page" ──
   if (/^(index|page|layout|route)\.(ts|tsx|js|jsx|py)$/.test(fileName)) {
     const kind = fileName.split('.')[0];
     const name = parentDir
@@ -263,23 +384,16 @@ function friendlyPath(filePath) {
     return `the ${name} ${kind}`;
   }
 
-  // ── Well-known config/root files → spoken as-is ──
   if (/^(package\.json|tsconfig.*\.json|next\.config\.\w+|tailwind\.config\.\w+|\.env.*|Dockerfile|docker-compose.*|Makefile|Cargo\.toml|go\.(mod|sum)|pyproject\.toml|requirements\.txt|pom\.xml|build\.gradle.*)$/i.test(fileName)) {
     return fileName.replace(/\./g, ' ');
   }
 
-  // ── General files ──
-  // Separate base name from extension
   const extMatch = fileName.match(/\.(ts|tsx|js|jsx|py|rs|go|java|rb|md|json|yaml|yml|toml|css|scss|html|sql|sh|swift|kt|c|cpp|h|hpp|vue|svelte)$/);
   const ext = extMatch ? extMatch[1] : '';
   const base = ext ? fileName.slice(0, -(ext.length + 1)) : fileName;
   const humanBase = base.replace(/[-_]/g, ' ');
-
-  // Build spoken name: "auth service dot py"
   const spokenName = ext ? `${humanBase} dot ${ext}` : humanBase;
 
-  // ── Parent folder context ──
-  // Skip generic container dirs that don't add useful context
   const SKIP_PARENTS = /^(src|app|lib|dist|build|out|public|static|internal|cmd|pkg|node_modules|__pycache__|\.next)$/i;
 
   if (parentDir && !SKIP_PARENTS.test(parentDir)) {
@@ -288,7 +402,6 @@ function friendlyPath(filePath) {
       .replace(/^\(.*\)$/, (m) => m.slice(1, -1))
       .replace(/[-_]/g, ' ');
 
-    // Don't repeat context if parent name is already in the file name
     if (!humanBase.toLowerCase().includes(humanParent.toLowerCase()) &&
         !humanParent.toLowerCase().includes(humanBase.toLowerCase())) {
       return `${spokenName} in ${humanParent}`;
@@ -316,22 +429,22 @@ function inferArea(recentActions) {
   const areas = recent
     .map((a) => {
       const t = a.target || '';
-      if (/auth/i.test(t)) return 'authentication';
-      if (/payment|stripe|checkout/i.test(t)) return 'payments';
-      if (/course/i.test(t)) return 'courses';
-      if (/enroll/i.test(t)) return 'enrollments';
-      if (/video/i.test(t)) return 'video';
-      if (/cert/i.test(t)) return 'certificates';
-      if (/test/i.test(t)) return 'tests';
-      if (/migrat/i.test(t)) return 'migrations';
-      if (/config/i.test(t)) return 'configuration';
+      // Derive area from path components rather than hardcoded domain terms
+      const parts = t.split('/').filter(Boolean);
+      const lastPart = parts[parts.length - 1] || t;
+      if (/auth/i.test(lastPart)) return 'authentication';
+      if (/test|spec/i.test(lastPart)) return 'tests';
+      if (/migrat/i.test(lastPart)) return 'migrations';
+      if (/config|settings/i.test(lastPart)) return 'configuration';
+      if (/api|endpoint|route/i.test(lastPart)) return 'API';
+      if (/style|css|theme/i.test(lastPart)) return 'styling';
+      if (/model|schema|entity/i.test(lastPart)) return 'data models';
+      if (/component|widget|view/i.test(lastPart)) return 'components';
       return null;
     })
     .filter(Boolean);
 
   if (areas.length < 3) return null;
-
-  // Most frequent area in last 5 actions
   const counts = {};
   for (const a of areas) counts[a] = (counts[a] || 0) + 1;
   const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
@@ -340,7 +453,7 @@ function inferArea(recentActions) {
 
 // ─── Narration generation ───────────────────────────────────────────────────
 
-function generateNarration(toolName, toolInput) {
+function generateNarration(toolName, toolInput, state) {
   const desc = toolInput.description || '';
 
   // Priority 1: Use description field if non-generic
@@ -350,35 +463,45 @@ function generateNarration(toolName, toolInput) {
     return askStyle(trimmed.charAt(0).toLowerCase() + trimmed.slice(1));
   }
 
-  // Priority 2: Template matching
+  // Priority 2: Template matching with rich phrasing
   switch (toolName) {
     case 'Read': {
       const name = friendlyPath(toolInput.file_path);
-      return askStyle(name ? `read ${name}` : 'read a file');
+      const verb = pickVerb(VERB_POOLS.read, state);
+      return askStyle(name ? `${verb} ${name}` : `${verb} a file`);
     }
     case 'Edit': {
       const name = friendlyPath(toolInput.file_path);
-      return askStyle(name ? `edit ${name}` : 'edit a file');
+      const verb = pickVerb(VERB_POOLS.edit, state);
+      return askStyle(name ? `${verb} ${name}` : `${verb} a file`);
     }
     case 'Write': {
       const name = friendlyPath(toolInput.file_path);
-      const verb = toolInput.file_path && fs.existsSync(toolInput.file_path) ? 'update' : 'create';
+      const exists = toolInput.file_path && fs.existsSync(toolInput.file_path);
+      const verb = pickVerb(exists ? VERB_POOLS.update : VERB_POOLS.create, state);
       return askStyle(name ? `${verb} ${name}` : `${verb} a file`);
     }
     case 'Grep': {
       const pat = shortPattern(toolInput.pattern);
-      return askStyle(`search for ${pat}`);
+      const verb = pickVerb(VERB_POOLS.search, state);
+      return askStyle(`${verb} ${pat}`);
     }
     case 'Glob': {
       const pat = toolInput.pattern || '';
-      return askStyle(pat ? `find ${pat} files` : 'find some files');
+      const verb = pickVerb(VERB_POOLS.find, state);
+      return askStyle(pat ? `${verb} ${pat} files` : `${verb} some files`);
     }
     case 'Bash': {
       const cmd = (toolInput.command || '').trim();
-      for (const [rx, action] of BASH_TEMPLATES) {
-        if (rx.test(cmd)) return askStyle(action);
+      for (const [rx, staticPhrase, poolKey] of BASH_TEMPLATES) {
+        if (rx.test(cmd)) {
+          if (poolKey && VERB_POOLS[poolKey]) {
+            return askStyle(pickVerb(VERB_POOLS[poolKey], state));
+          }
+          return askStyle(staticPhrase);
+        }
       }
-      return askStyle('run a command');
+      return askStyle(pickVerb(VERB_POOLS.run, state));
     }
     case 'Agent': {
       const agentDesc = toolInput.description || '';
@@ -387,7 +510,7 @@ function generateNarration(toolName, toolInput) {
         const short = words.length <= 6 ? agentDesc : words.slice(0, 5).join(' ');
         return askStyle(`launch an agent for ${short}`);
       }
-      return askStyle('launch a sub-agent');
+      return askStyle(pickVerb(VERB_POOLS.agent, state));
     }
     default:
       return askStyle(`use ${toolName}`);
@@ -396,13 +519,9 @@ function generateNarration(toolName, toolInput) {
 
 function getTarget(toolName, toolInput) {
   switch (toolName) {
-    case 'Read':
-    case 'Edit':
-    case 'Write':
+    case 'Read': case 'Edit': case 'Write':
       return toolInput.file_path || '';
-    case 'Grep':
-      return toolInput.pattern || '';
-    case 'Glob':
+    case 'Grep': case 'Glob':
       return toolInput.pattern || '';
     case 'Bash':
       return (toolInput.command || '').slice(0, 60);
@@ -413,6 +532,53 @@ function getTarget(toolName, toolInput) {
   }
 }
 
+// ─── Gemini API client ──────────────────────────────────────────────────────
+
+function callGemini(prompt, config) {
+  const jarvis = config.jarvis || DEFAULTS.jarvis;
+  const apiKey = jarvis.apiKey || process.env.GEMINI_API_KEY;
+  if (!apiKey) return Promise.resolve(null);
+
+  const model = jarvis.model || DEFAULTS.jarvis.model;
+  const timeoutMs = jarvis.timeoutMs || DEFAULTS.jarvis.timeoutMs;
+
+  const body = JSON.stringify({
+    system_instruction: {
+      parts: [{ text: 'You are Jarvis, a warm and conversational voice assistant for a developer. Generate ONE short sentence (max 15 words) narrating what just happened or what is about to happen. Be warm but not silly. No emojis. No code. Written to be spoken aloud, so write for the ear, not the eye.' }],
+    },
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { maxOutputTokens: 60, temperature: 0.7 },
+  });
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), timeoutMs);
+
+    const req = https.request({
+      hostname: 'generativelanguage.googleapis.com',
+      path: `/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        clearTimeout(timeout);
+        try {
+          const json = JSON.parse(Buffer.concat(chunks).toString());
+          const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          resolve(text || null);
+        } catch { resolve(null); }
+      });
+    });
+
+    req.on('error', () => { clearTimeout(timeout); resolve(null); });
+    req.on('timeout', () => { req.destroy(); clearTimeout(timeout); resolve(null); });
+    req.write(body);
+    req.end();
+  });
+}
+
 // ─── Speech ─────────────────────────────────────────────────────────────────
 
 function ensureCacheDir() {
@@ -421,10 +587,35 @@ function ensureCacheDir() {
   } catch { /* ignore */ }
 }
 
+function speakWithMlx(text, config, isDestructiveAction, sessionNum) {
+  const mlx = config.mlx || DEFAULTS.mlx;
+  const model = mlx.model || DEFAULTS.mlx.model;
+  const voice = mlx.voice || DEFAULTS.mlx.voice;
+  const speed = isDestructiveAction ? 0.85 : (mlx.speed || DEFAULTS.mlx.speed);
+  const volume = config.volume ?? DEFAULTS.volume;
+
+  const hash = crypto.createHash('md5').update(`mlx:${voice}:${speed}:${text}`).digest('hex').slice(0, 12);
+  const tmpFile = path.join(TMP_DIR, `${TMP_PREFIX}sess${sessionNum}-${hash}.wav`);
+
+  try {
+    if (!fs.existsSync(tmpFile)) {
+      // Escape text via JSON.stringify to prevent shell injection
+      const escaped = JSON.stringify(text);
+      execSync(`python3 -m mlx_audio.tts.generate --model ${JSON.stringify(model)} --text ${escaped} --voice ${JSON.stringify(voice)} --speed ${speed} --output ${JSON.stringify(tmpFile)}`, {
+        timeout: 5000,
+        stdio: 'ignore',
+      });
+    }
+    playFile(tmpFile, volume, sessionNum);
+  } catch {
+    // Fallback to macOS say
+    speakWithSay(text, config, isDestructiveAction, sessionNum);
+  }
+}
+
 function speakWithSay(text, config, isDestructiveAction, sessionNum) {
   const voice = config.voice || DEFAULTS.voice;
   const rate = isDestructiveAction ? 190 : (config.rate || DEFAULTS.rate);
-  const volume = config.volume ?? DEFAULTS.volume;
 
   const hash = crypto.createHash('md5').update(`say:${voice}:${rate}:${text}`).digest('hex').slice(0, 12);
   const tmpFile = path.join(TMP_DIR, `${TMP_PREFIX}sess${sessionNum}-${hash}.aiff`);
@@ -445,22 +636,19 @@ function speakWithElevenLabs(text, config, isDestructiveAction, sessionNum) {
   const apiKey = el.apiKey || process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return speakWithSay(text, config, isDestructiveAction, sessionNum);
 
-  const voiceId = el.voiceId || 'EXAVITQu4vr4xnSDxMaL'; // Sarah
+  const voiceId = el.voiceId || 'EXAVITQu4vr4xnSDxMaL';
   const model = el.model || 'eleven_turbo_v2_5';
   const volume = config.volume ?? DEFAULTS.volume;
 
-  // Cache in persistent dir (ElevenLabs calls cost money)
   ensureCacheDir();
   const hash = crypto.createHash('md5').update(`el:${voiceId}:${model}:${text}`).digest('hex').slice(0, 16);
   const cacheFile = path.join(CACHE_DIR, `${hash}.mp3`);
 
-  // Cache hit — play immediately
   if (fs.existsSync(cacheFile)) {
     playFile(cacheFile, volume, sessionNum);
     return;
   }
 
-  // Cache miss — call ElevenLabs API (async, non-blocking via fire-and-forget)
   const body = JSON.stringify({
     text,
     model_id: model,
@@ -480,7 +668,6 @@ function speakWithElevenLabs(text, config, isDestructiveAction, sessionNum) {
     timeout: 4000,
   }, (res) => {
     if (res.statusCode !== 200) {
-      // Fallback to say on API error
       speakWithSay(text, config, isDestructiveAction, sessionNum);
       res.resume();
       return;
@@ -496,21 +683,17 @@ function speakWithElevenLabs(text, config, isDestructiveAction, sessionNum) {
     });
   });
 
-  req.on('error', () => {
-    // Fallback to say
-    speakWithSay(text, config, isDestructiveAction, sessionNum);
-  });
-  req.on('timeout', () => {
-    req.destroy();
-    speakWithSay(text, config, isDestructiveAction, sessionNum);
-  });
+  req.on('error', () => speakWithSay(text, config, isDestructiveAction, sessionNum));
+  req.on('timeout', () => { req.destroy(); speakWithSay(text, config, isDestructiveAction, sessionNum); });
   req.write(body);
   req.end();
 }
 
 function speak(text, config, isDestructiveAction, sessionNum) {
   const tts = config.tts || DEFAULTS.tts;
-  if (tts === 'elevenlabs') {
+  if (tts === 'mlx') {
+    speakWithMlx(text, config, isDestructiveAction, sessionNum);
+  } else if (tts === 'elevenlabs') {
     speakWithElevenLabs(text, config, isDestructiveAction, sessionNum);
   } else {
     speakWithSay(text, config, isDestructiveAction, sessionNum);
@@ -519,7 +702,6 @@ function speak(text, config, isDestructiveAction, sessionNum) {
 
 function playFile(filePath, volume, sessionNum) {
   try {
-    // Kill any previous narrator audio for this session
     try {
       execSync(`pkill -f "afplay.*/tmp/claude-narrator-.*sess${sessionNum}"`, {
         stdio: 'ignore', timeout: 500
@@ -550,11 +732,10 @@ function playAlert(config) {
 
 function cleanupOldTempFiles() {
   try {
-    // Clean /tmp say-generated files (5 min TTL)
     const files = fs.readdirSync(TMP_DIR);
     const now = Date.now();
     for (const f of files) {
-      if (f.startsWith(TMP_PREFIX) && f.endsWith('.aiff')) {
+      if (f.startsWith(TMP_PREFIX) && (f.endsWith('.aiff') || f.endsWith('.wav'))) {
         const fp = path.join(TMP_DIR, f);
         const stat = fs.statSync(fp);
         if (now - stat.mtimeMs > 5 * 60 * 1000) {
@@ -562,7 +743,6 @@ function cleanupOldTempFiles() {
         }
       }
     }
-    // Clean ElevenLabs cache (7 day TTL)
     if (fs.existsSync(CACHE_DIR)) {
       for (const f of fs.readdirSync(CACHE_DIR)) {
         const fp = path.join(CACHE_DIR, f);
@@ -575,55 +755,54 @@ function cleanupOldTempFiles() {
   } catch { /* ignore */ }
 }
 
-// ─── Main ───────────────────────────────────────────────────────────────────
+// ─── Session voice configuration ────────────────────────────────────────────
+
+function applySessionVoice(config, sessionNum) {
+  if (sessionNum === 0) return;
+  const extras = config.sessionVoices || DEFAULTS.sessionVoices;
+  const sv = extras[(sessionNum - 1) % extras.length];
+  if (!sv) return;
+
+  // macOS say voice
+  config.voice = sv.voice || config.voice;
+  config.rate = sv.rate || config.rate;
+
+  // mlx-audio voice
+  if (sv.mlxVoice && config.mlx) {
+    config.mlx = { ...config.mlx, voice: sv.mlxVoice };
+  }
+
+  // ElevenLabs voice
+  if (sv.elevenLabsVoiceId && config.elevenlabs) {
+    config.elevenlabs = { ...config.elevenlabs, voiceId: sv.elevenLabsVoiceId };
+  }
+}
+
+// ─── Main (PreToolUse) ──────────────────────────────────────────────────────
 
 async function main() {
-  let rawInput = '';
-
-  // Read stdin
   const chunks = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk);
-  }
-  rawInput = Buffer.concat(chunks).toString('utf8');
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const rawInput = Buffer.concat(chunks).toString('utf8');
 
   // Always output the original JSON (passthrough)
   process.stdout.write(rawInput);
 
-  // Parse input
   let input;
-  try {
-    input = JSON.parse(rawInput);
-  } catch {
-    return; // Not valid JSON, nothing to narrate
-  }
+  try { input = JSON.parse(rawInput); } catch { return; }
 
   const toolName = input.tool_name;
   const toolInput = input.tool_input || {};
 
-  // Check mute
   if (fs.existsSync(MUTE_FILE)) return;
 
-  // Load config
   const config = loadConfig();
   if (!config.enabled) return;
 
-  // ── Session detection ──
+  // Session detection
   const sessionNum = getSessionNumber();
   activeSession = sessionNum;
-
-  // Override voice for non-primary sessions
-  if (sessionNum > 0) {
-    const extras = config.sessionVoices || DEFAULTS.sessionVoices;
-    const sv = extras[(sessionNum - 1) % extras.length];
-    if (sv) {
-      config.voice = sv.voice || config.voice;
-      config.rate = sv.rate || config.rate;
-      if (sv.elevenLabsVoiceId && config.elevenlabs) {
-        config.elevenlabs = { ...config.elevenlabs, voiceId: sv.elevenLabsVoiceId };
-      }
-    }
-  }
+  applySessionVoice(config, sessionNum);
 
   // Check if tool should be narrated
   const narrate = config.narrateTools || DEFAULTS.narrateTools;
@@ -639,7 +818,7 @@ async function main() {
 
   // Repetition suppression
   const threshold = config.repetitionThreshold || DEFAULTS.repetitionThreshold;
-  let isSameTool = state.lastTool === toolName && timeSinceLastMs < 10000;
+  const isSameTool = state.lastTool === toolName && timeSinceLastMs < 10000;
 
   if (isSameTool) {
     state.consecutiveCount = (state.consecutiveCount || 0) + 1;
@@ -647,23 +826,33 @@ async function main() {
     state.consecutiveCount = 1;
   }
 
-  // Update state
-  state.lastTool = toolName;
-  state.lastTimestamp = now;
-
   const target = getTarget(toolName, toolInput);
   const recentActions = state.recentActions || [];
   recentActions.push({ tool: toolName, target, ts: now });
 
-  // Keep only maxContextItems
   const maxCtx = config.maxContextItems || DEFAULTS.maxContextItems;
   while (recentActions.length > maxCtx) recentActions.shift();
   state.recentActions = recentActions;
 
-  // Generate narration
+  // ── Pattern detection ──
+  const pattern = detectPattern(recentActions, state);
+
+  // ── Milestone detection (for Rich Tier) ──
+  const milestone = detectMilestone(toolName, toolInput, state);
+  let geminiPromise = null;
+  const jarvis = config.jarvis || DEFAULTS.jarvis;
+  if (milestone && jarvis.enabled && (jarvis.apiKey || process.env.GEMINI_API_KEY)) {
+    const ctx = recentActions.slice(-5).map((a) => `${a.tool}: ${a.target}`).join(', ');
+    const prompt = `Event: ${milestone.type}\nTool: ${toolName}\nRecent context: ${ctx}`;
+    geminiPromise = callGemini(prompt, config);
+  }
+
+  // Generate narration text
   let text;
-  if (state.consecutiveCount === threshold) {
-    // Batch summary
+  if (pattern && PATTERN_PHRASES[pattern]) {
+    const phrases = PATTERN_PHRASES[pattern];
+    text = phrases[now % phrases.length];
+  } else if (state.consecutiveCount === threshold) {
     const toolLabel = toolName === 'Read' ? 'read' :
                       toolName === 'Edit' ? 'edit' :
                       toolName === 'Write' ? 'write' :
@@ -672,18 +861,23 @@ async function main() {
                       `use ${toolName} on`;
     text = askStyle(`${toolLabel} a few more files`);
   } else if (state.consecutiveCount > threshold) {
-    // Silent — too many repetitions
+    state.lastTool = toolName;
+    state.lastTimestamp = now;
     saveState(stPath, state);
     return;
   } else {
-    text = generateNarration(toolName, toolInput);
+    text = generateNarration(toolName, toolInput, state);
+  }
+
+  // Warm connectors on tool-type change
+  if (!pattern) {
+    text = maybeAddConnector(text, state, toolName);
   }
 
   // Context awareness — prepend area if stable
-  if (state.consecutiveCount === 1) {
+  if (state.consecutiveCount === 1 && !pattern) {
     const area = inferArea(recentActions);
     if (area && text && !text.toLowerCase().includes(area)) {
-      // Only add context on first action in a new batch
       const lastArea = state.lastArea;
       if (area !== lastArea) {
         text = `Still on ${area}. ${text}`;
@@ -692,13 +886,24 @@ async function main() {
     state.lastArea = inferArea(recentActions);
   }
 
+  // If Gemini returned in time, use its text for milestone events
+  if (geminiPromise) {
+    const geminiText = await geminiPromise;
+    if (geminiText && geminiText.length > 3 && geminiText.length < 100) {
+      text = geminiText;
+    }
+  }
+
+  // Update state
+  state.lastTool = toolName;
+  state.lastTimestamp = now;
+
   // Destructive action alert
   const command = toolInput.command || '';
   const destructive = toolName === 'Bash' && isDestructive(command);
 
   if (destructive) {
     playAlert(config);
-    // Small delay so alert plays before narration
     await new Promise((r) => setTimeout(r, 200));
   }
 
@@ -712,7 +917,7 @@ async function main() {
   if (Math.random() < 0.05) cleanupOldTempFiles();
 }
 
-// ─── PostToolUse — failure narration ─────────────────────────────────────────
+// ─── PostToolUse — failure & success narration ──────────────────────────────
 
 async function mainPost() {
   const chunks = [];
@@ -731,41 +936,61 @@ async function mainPost() {
   const toolName = input.tool_name;
   const toolOutput = input.tool_output || {};
 
-  // Only narrate Bash failures
   if (toolName !== 'Bash') return;
+
   const exitCode = toolOutput.exitCode ?? toolOutput.exit_code;
-  if (exitCode === 0 || exitCode === undefined || exitCode === null) return;
-
-  // Detect what kind of failure
   const cmd = (input.tool_input?.command || '').trim();
-  let text = 'That failed';
-  for (const [rx] of BASH_TEMPLATES) {
-    if (/test|spec|jest|pytest|cargo\s+test|go\s+test/.test(rx.source) && rx.test(cmd)) {
-      text = 'Tests failed';
-      break;
-    }
-    if (/build/.test(rx.source) && rx.test(cmd)) {
-      text = 'Build failed';
-      break;
-    }
-  }
+  const isTestCmd = /test|spec|jest|pytest|cargo\s+test|go\s+test/i.test(cmd);
+  const isBuildCmd = /\bbuild\b/i.test(cmd);
 
+  // Store exit code in state for pattern detection
   const sessionNum = getSessionNumber();
+  const stPath = statePath(sessionNum);
+  const state = loadState(stPath);
+  state.lastBashExitCode = exitCode;
+  saveState(stPath, state);
 
-  // Override voice for non-primary sessions
-  if (sessionNum > 0) {
-    const extras = config.sessionVoices || DEFAULTS.sessionVoices;
-    const sv = extras[(sessionNum - 1) % extras.length];
-    if (sv) {
-      config.voice = sv.voice || config.voice;
-      config.rate = sv.rate || config.rate;
+  // Determine if we should narrate
+  const isFailure = exitCode !== 0 && exitCode !== undefined && exitCode !== null;
+  const isTestSuccess = exitCode === 0 && isTestCmd;
+
+  if (!isFailure && !isTestSuccess) return;
+
+  applySessionVoice(config, sessionNum);
+
+  // Try Gemini for richer narration
+  const jarvis = config.jarvis || DEFAULTS.jarvis;
+  let text;
+
+  if (jarvis.enabled && (jarvis.apiKey || process.env.GEMINI_API_KEY)) {
+    const stderr = (toolOutput.stderr || '').slice(0, 200);
+    const eventType = isFailure ? (isTestCmd ? 'test_failure' : isBuildCmd ? 'build_failure' : 'command_failure') : 'test_success';
+    const prompt = `Event: ${eventType}\nCommand: ${cmd}\n${isFailure && stderr ? `Error snippet: ${stderr}\n` : ''}`;
+    text = await callGemini(prompt, config);
+  }
+
+  // Fallback to static phrases
+  if (!text) {
+    if (isTestSuccess) {
+      text = 'Nice, tests are green';
+    } else if (isTestCmd) {
+      text = 'Tests failed';
+    } else if (isBuildCmd) {
+      text = 'Build failed';
+    } else {
+      text = 'That failed';
     }
   }
 
-  const failConfig = { ...config, volume: (config.volume ?? 0.5) * 0.8 };
-  playAlert(failConfig);
-  await new Promise((r) => setTimeout(r, 200));
-  speak(text, failConfig, true, sessionNum);
+  const failVolume = isFailure ? (config.volume ?? 0.5) * 0.8 : config.volume ?? 0.5;
+  const speakConfig = { ...config, volume: failVolume };
+
+  if (isFailure) {
+    playAlert(speakConfig);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  speak(text, speakConfig, isFailure, sessionNum);
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

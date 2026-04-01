@@ -3,10 +3,28 @@
   "voice": "Samantha",
   "rate": 210,
   "volume": 0.5,
-  "tts": "say",
+  "tts": "mlx",
+  "mlx": {
+    "model": "mlx-community/Kokoro-82M-bf16",
+    "voice": "af_heart",
+    "speed": 1.0
+  },
+  "jarvis": {
+    "enabled": false,
+    "apiKey": "",
+    "model": "gemini-2.5-flash-lite",
+    "personality": "warm",
+    "timeoutMs": 2000
+  },
   "narrateTools": ["Bash", "Edit", "Write", "Read", "Grep", "Glob", "Agent"],
   "skipTools": [],
+  "narrateFailures": true,
   "maxContextItems": 15,
   "repetitionThreshold": 3,
-  "destructiveAlertSound": "/System/Library/Sounds/Basso.aiff"
+  "destructiveAlertSound": "/System/Library/Sounds/Basso.aiff",
+  "sessionVoices": [
+    { "voice": "Daniel (Enhanced)", "mlxVoice": "am_adam", "rate": 200 },
+    { "voice": "Karen (Enhanced)", "mlxVoice": "bf_emma", "rate": 205 },
+    { "voice": "Tessa (Enhanced)", "mlxVoice": "am_michael", "rate": 200 }
+  ]
 }

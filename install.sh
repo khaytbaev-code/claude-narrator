@@ -49,6 +49,37 @@ if [ ! -d "$CLAUDE_DIR" ]; then
 fi
 ok "Claude Code directory found"
 
+# ─── Install mlx-audio (Apple Silicon) ──────────────────────────────────────
+
+MLX_TTS="say"
+ARCH=$(uname -m)
+if [ "$ARCH" = "arm64" ]; then
+  info "Apple Silicon detected — installing mlx-audio for Kokoro voices..."
+  if command -v python3 &>/dev/null; then
+    PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
+    PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
+    if [ "$PYTHON_MAJOR" -ge 3 ] && [ "$PYTHON_MINOR" -ge 9 ]; then
+      if python3 -c "import mlx_audio" 2>/dev/null; then
+        ok "mlx-audio already installed"
+        MLX_TTS="mlx"
+      else
+        if command -v uv &>/dev/null; then
+          uv pip install mlx-audio 2>/dev/null && MLX_TTS="mlx" && ok "Installed mlx-audio via uv" || warn "Failed to install mlx-audio — using macOS say"
+        else
+          pip install mlx-audio 2>/dev/null && MLX_TTS="mlx" && ok "Installed mlx-audio via pip" || warn "Failed to install mlx-audio — using macOS say"
+        fi
+      fi
+    else
+      warn "Python $PYTHON_VERSION found, but 3.9+ required for mlx-audio — using macOS say"
+    fi
+  else
+    warn "Python 3 not found — mlx-audio requires Python 3.9+. Using macOS say"
+  fi
+else
+  warn "Intel Mac detected — mlx-audio requires Apple Silicon. Using macOS say"
+fi
+
 # ─── Determine script source ────────────────────────────────────────────────
 
 # If running from a cloned repo, use local files. Otherwise, download.
@@ -81,9 +112,38 @@ ok "Installed narrator.js to $SCRIPTS_DIR/"
 # ─── Install config (don't overwrite existing) ──────────────────────────────
 
 if [ -f "$CONFIG_FILE" ]; then
-  warn "Config already exists at $CONFIG_FILE — keeping your settings"
+  # Update tts engine in existing config if mlx is available
+  if [ "$MLX_TTS" = "mlx" ]; then
+    node -e "
+      const fs = require('fs');
+      const raw = fs.readFileSync('$CONFIG_FILE', 'utf8');
+      const conf = JSON.parse(raw);
+      if (!conf.mlx) conf.mlx = { model: 'mlx-community/Kokoro-82M-bf16', voice: 'af_heart', speed: 1.0 };
+      if (!conf.jarvis) conf.jarvis = { enabled: false, apiKey: '', model: 'gemini-2.5-flash-lite', personality: 'warm', timeoutMs: 2000 };
+      if (conf.tts === 'say') conf.tts = 'mlx';
+      if (!conf.narrateFailures) conf.narrateFailures = true;
+      // Add mlxVoice to sessionVoices if missing
+      const defaultMlxVoices = ['am_adam', 'bf_emma', 'am_michael'];
+      if (conf.sessionVoices) {
+        conf.sessionVoices = conf.sessionVoices.map((sv, i) => sv.mlxVoice ? sv : { ...sv, mlxVoice: defaultMlxVoices[i] || 'am_adam' });
+      }
+      fs.writeFileSync('$CONFIG_FILE', JSON.stringify(conf, null, 2) + '\n');
+    " 2>/dev/null
+    ok "Updated config with mlx-audio and Jarvis settings"
+  else
+    warn "Config already exists at $CONFIG_FILE — keeping your settings"
+  fi
 else
+  # Fresh install — set tts based on what's available
   cp "$SOURCE_DIR/narrator.json" "$CONFIG_FILE"
+  if [ "$MLX_TTS" != "mlx" ]; then
+    node -e "
+      const fs = require('fs');
+      const conf = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf8'));
+      conf.tts = 'say';
+      fs.writeFileSync('$CONFIG_FILE', JSON.stringify(conf, null, 2) + '\n');
+    " 2>/dev/null
+  fi
   ok "Installed default config to $CONFIG_FILE"
 fi
 
@@ -223,11 +283,15 @@ echo "    narrator-unmute   Resume narration"
 echo "    narrator-test     Test the narrator audio"
 echo ""
 echo "  Config: $CONFIG_FILE"
-echo "  Voices: run 'say -v \"?\"' to see all available voices"
+echo "  Jarvis: set jarvis.apiKey in $CONFIG_FILE for smart narration"
+echo "  Voices: Kokoro (mlx) or run 'say -v \"?\"' for macOS voices"
 echo ""
 
 # Test sound
-if command -v say &>/dev/null; then
+if [ "$MLX_TTS" = "mlx" ]; then
+  info "Playing test narration with Kokoro voice..."
+  python3 -m mlx_audio.tts.generate --model "mlx-community/Kokoro-82M-bf16" --text "Claude Code Narrator installed. Jarvis mode ready." --voice "af_heart" --output "/tmp/claude-narrator-test.wav" 2>/dev/null && afplay "/tmp/claude-narrator-test.wav" &
+elif command -v say &>/dev/null; then
   info "Playing test narration..."
   say -v "${NARRATOR_VOICE:-Samantha}" "Claude Code Narrator installed" &
 fi
