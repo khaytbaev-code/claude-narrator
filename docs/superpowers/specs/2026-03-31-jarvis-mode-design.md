@@ -1,4 +1,4 @@
-# Jarvis Mode — Two-Tier Narration with Gemini API & Piper TTS
+# Jarvis Mode — Two-Tier Narration with Gemini API & mlx-audio TTS
 
 **Date:** 2026-03-31
 **Status:** Draft
@@ -15,11 +15,11 @@ Evolve the narrator into a two-tier system:
 1. **Fast Tier** — Enhanced smart templates for per-tool narrations. No API call, ~0ms latency. Richer phrasing, pattern detection, warm transitions.
 2. **Rich Tier** — Gemini 2.5 Flash-Lite API generates context-aware narration at milestone events. ~0.3s latency, falls back to fast tier on timeout.
 
-Add **Piper TTS** as an optional local neural voice engine for natural-sounding speech without cloud dependency.
+Add **mlx-audio** (Kokoro) as an optional local neural voice engine for natural-sounding speech on Apple Silicon, without cloud dependency.
 
 ## Non-Goals
 
-- Piper is not bundled — it's an optional download (~45MB)
+- mlx-audio is not bundled — it's an optional `pip install` (Apple Silicon only)
 - No streaming/real-time voice (Gemini Live) — overkill for short narrations
 - No conversation with the narrator — it's one-way commentary
 - No changes to the passthrough guarantee or hook contract
@@ -47,7 +47,7 @@ PostToolUse hook --> narrator.js --post
 
 ### Passthrough guarantee preserved
 
-stdin JSON is always written to stdout unchanged, even if Gemini API fails, Piper crashes, or any other error occurs. The narrator never blocks Claude Code.
+stdin JSON is always written to stdout unchanged, even if Gemini API fails, mlx-audio crashes, or any other error occurs. The narrator never blocks Claude Code.
 
 ### Single file preserved
 
@@ -147,63 +147,82 @@ No retry logic. Fire once, use result or fall back. Simple.
 - 15 calls/session: ~$0.00033/session
 - Free tier: 1,000 requests/day, 15 RPM — covers normal usage entirely
 
-## Piper TTS — Local Neural Voice
+## mlx-audio — Local Neural Voice (Apple Silicon)
 
-### What is Piper
+### What is mlx-audio
 
-[Piper](https://github.com/rhasspy/piper) is a fast, local neural text-to-speech engine. Single binary (~5MB) + voice model file (~40MB). Produces natural-sounding speech with ~100-200ms latency — faster and better-sounding than macOS `say`.
+[mlx-audio](https://github.com/Blaizzy/mlx-audio) is a high-quality local TTS engine built on Apple's MLX framework. It runs natively on Apple Silicon (M1+) and supports 54 Kokoro voices with natural-sounding speech. Install via `pip install mlx-audio` or `uv tool install mlx-audio`.
+
+- **6,500+ GitHub stars**, very actively maintained
+- **Kokoro model**: 82M parameters, 54 voices, fast inference
+- **Streaming support**: `--stream` flag for real-time playback during generation
+- **CLI**: `mlx_audio.tts.generate --model mlx-community/Kokoro-82M-bf16 --text 'Hello' --voice af_heart`
+- **Requirement**: Apple Silicon Mac (M1/M2/M3/M4). Does NOT work on Intel Macs.
 
 ### Voice strategy
 
 | Config value | Engine | Use case |
 |-------------|--------|----------|
-| `"say"` (default) | macOS built-in | Zero setup, works out of box |
-| `"piper"` | Piper local neural | Natural voice, no cloud, optional download |
+| `"say"` (default) | macOS built-in | Zero setup, works out of box, any Mac |
+| `"mlx"` | mlx-audio Kokoro | High-quality local neural voice, Apple Silicon only |
 | `"elevenlabs"` | ElevenLabs cloud | Premium quality, costs money per call |
 
 ### Installation
 
-Piper is optional. `install.sh` offers to download it:
+mlx-audio is optional. `install.sh` offers to install it:
 
 ```
 install.sh:
-  "Want natural-sounding voice? I can download Piper TTS (~45MB). [y/N]"
-  → Downloads piper binary + en_US-lessac-medium model to ~/.claude/narrator-piper/
-  → Sets tts: "piper" in narrator.json
-  → Falls back to "say" if download fails
+  Detects Apple Silicon (uname -m == arm64)
+  → "Want high-quality local voice? I can install mlx-audio (~200MB first run for model). [y/N]"
+  → Runs: pip install mlx-audio (or uv pip install mlx-audio)
+  → First TTS call auto-downloads Kokoro model from HuggingFace to ~/.cache/huggingface/
+  → Sets tts: "mlx" in narrator.json
+  → Falls back to "say" on Intel Macs or if install fails
 ```
 
-If user declines or Piper is unavailable, macOS `say` works as before.
+If user declines, is on Intel, or mlx-audio is unavailable, macOS `say` works as before.
 
-Downloads are verified with SHA-256 checksums (published by the Piper project) via `shasum -a 256 -c` before marking installation complete.
-
-### speakWithPiper implementation
+### speakWithMlx implementation
 
 ```
-function speakWithPiper(text, config, isDestructiveAction, sessionNum):
+function speakWithMlx(text, config, isDestructiveAction, sessionNum):
   1. Hash text for cache key (same pattern as say/elevenlabs)
-  2. Generate WAV via spawnSync with input option (NOT shell pipe — avoids injection risk):
-     spawnSync(piperBinary, ['--model', model, '--output_file', tmpFile], { input: text });
-     // Uses spawnSync like speakWithSay uses execSync — acceptable for ~100-200ms synthesis
+  2. Generate WAV via execSync (NOT shell pipe — text passed as argument with escaping):
+     execSync(`python3 -m mlx_audio.tts.generate --model "${model}" --text "${escaped}" --voice "${voice}" --output "${tmpFile}"`,
+       { timeout: 5000, stdio: 'ignore' });
+     // First call may be slow (~2-3s) as model loads; subsequent calls use cached model (~200-500ms)
   3. Play via playFile() (same kill-and-replace, same session scoping)
   4. On any error: fall back to speakWithSay()
 ```
 
 Temp files follow the same pattern: `/tmp/claude-narrator-sess{N}-{hash}.wav`
 
-### Multi-session voice limitation
+### Multi-session voice support
 
-Piper voices are distinct model files, not named voices like macOS `say`. Multi-session voice differentiation is **not supported** for Piper in this release — all sessions use the same model. Rate differentiation (Piper's `--length-scale` flag) is still applied per session for slight variation. Full multi-session Piper voice support would require downloading multiple model files and is deferred.
-
-### Piper config
+Kokoro has 54 built-in voices selectable by name (e.g., `af_heart`, `am_adam`, `bf_emma`). Multi-session voice differentiation works naturally — each session gets a different `voice` parameter from the config:
 
 ```json
 {
-  "tts": "piper",
-  "piper": {
-    "binary": "~/.claude/narrator-piper/piper",
-    "model": "~/.claude/narrator-piper/en_US-lessac-medium.onnx",
-    "speaker": 0
+  "sessionVoices": [
+    { "voice": "af_heart", "mlxVoice": "am_adam" },
+    { "voice": "Daniel (Enhanced)", "mlxVoice": "bf_emma" },
+    { "voice": "Karen (Enhanced)", "mlxVoice": "am_michael" }
+  ]
+}
+```
+
+Session 0 uses `mlx.voice` (default). Sessions 1+ use `sessionVoices[n].mlxVoice`. Falls back to macOS `say` with the `voice` field if mlx is unavailable.
+
+### mlx-audio config
+
+```json
+{
+  "tts": "mlx",
+  "mlx": {
+    "model": "mlx-community/Kokoro-82M-bf16",
+    "voice": "af_heart",
+    "speed": 1.0
   }
 }
 ```
@@ -222,10 +241,10 @@ All new fields are optional with backward-compatible defaults:
     "personality": "warm",
     "timeoutMs": 2000
   },
-  "piper": {
-    "binary": "~/.claude/narrator-piper/piper",
-    "model": "~/.claude/narrator-piper/en_US-lessac-medium.onnx",
-    "speaker": 0
+  "mlx": {
+    "model": "mlx-community/Kokoro-82M-bf16",
+    "voice": "af_heart",
+    "speed": 1.0
   }
 }
 ```
@@ -233,22 +252,22 @@ All new fields are optional with backward-compatible defaults:
 - `jarvis.enabled: false` by default — must opt in with API key
 - `jarvis.model` — configurable so users can update the model ID if the default alias changes or a newer model is released. Verify exact model ID against [Gemini API docs](https://ai.google.dev/gemini-api/docs/models) before shipping — dated preview IDs (e.g., `gemini-2.5-flash-lite-preview-06-17`) may be needed if the short alias isn't live yet.
 - `jarvis.personality` — reserved for future use (warm/dry/witty), currently only "warm"
-- `piper` — only read if `tts: "piper"`
+- `mlx` — only read if `tts: "mlx"`. Requires Apple Silicon Mac and `pip install mlx-audio`
 
 ## File Changes
 
 | File | Change |
 |------|--------|
-| `narrator.js` | Rich phrasing pools, pattern detector, warm connectors, milestone detector, Gemini API client, speakWithPiper, mainPost() upgrade, config additions |
-| `narrator.json` | Add `jarvis` and `piper` default config sections |
-| `install.sh` | Offer Piper download, prompt for Gemini API key, write new config sections |
-| `uninstall.sh` | Offer to remove ~/.claude/narrator-piper/ directory |
-| `CLAUDE.md` | Document Jarvis mode, Piper TTS, new config fields |
+| `narrator.js` | Rich phrasing pools, pattern detector, warm connectors, milestone detector, Gemini API client, speakWithMlx, mainPost() upgrade, config additions |
+| `narrator.json` | Add `jarvis` and `mlx` default config sections |
+| `install.sh` | Offer mlx-audio install (Apple Silicon only), prompt for Gemini API key, write new config sections |
+| `uninstall.sh` | Offer to uninstall mlx-audio pip package |
+| `CLAUDE.md` | Document Jarvis mode, mlx-audio TTS, new config fields |
 
 ### Estimated size
 
 - narrator.js: ~780 lines -> ~1050 lines (budget raised to 1100; use shared helpers and lookup tables to compress where possible)
-- No new files besides Piper binary/model (downloaded, not committed)
+- No new files (mlx-audio installed via pip, Kokoro model auto-downloaded to HuggingFace cache)
 
 ## Breaking Changes
 
@@ -260,7 +279,7 @@ None. Every new feature is behind config flags:
 
 ## Implementation Notes
 
-- `cleanupOldTempFiles()` must be extended to also match `.wav` files (Piper output). Simplest fix: check `f.startsWith(TMP_PREFIX)` without extension filter, since both `.aiff` and `.wav` share the prefix.
+- `cleanupOldTempFiles()` must be extended to also match `.wav` files (mlx-audio output). Simplest fix: check `f.startsWith(TMP_PREFIX)` without extension filter, since both `.aiff` and `.wav` share the prefix.
 - `inferArea()` contains hardcoded domain terms from a specific project. Should be generalized to derive context from path components. Tracked as a separate cleanup — not blocking for Jarvis Mode.
 
 ## Testing Plan
@@ -278,14 +297,16 @@ None. Every new feature is behind config flags:
 - Verify milestone detection triggers on correct events
 - Verify PostToolUse failure passes error context to Gemini
 
-### Piper TTS
-- Verify speakWithPiper generates WAV and plays via afplay
-- Verify fallback to say on Piper binary missing or error
+### mlx-audio TTS
+- Verify speakWithMlx generates WAV and plays via afplay
+- Verify fallback to say when mlx-audio not installed or on Intel Mac
 - Verify session-scoped temp file naming for kill-and-replace
-- Verify install.sh Piper download flow (accept/decline)
+- Verify multi-session voice assignment (different Kokoro voices per session)
+- Verify install.sh mlx-audio install flow (accept/decline, Apple Silicon check)
+- Verify first-run model download completes before TTS attempt
 
 ### Integration
 - Full session: verify fast + rich narrations interleave correctly
-- Multi-session: verify each session uses its own voice with Piper
+- Multi-session: verify each session uses its own Kokoro voice with mlx
 - Mute/unmute: verify both tiers respect mute file
 - Config migration: verify existing narrator.json without new fields works
